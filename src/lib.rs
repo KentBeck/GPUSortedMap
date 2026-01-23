@@ -655,48 +655,94 @@ struct MergeMeta {
 @group(0) @binding(4) var<uniform> input_meta: InputMeta;
 @group(0) @binding(5) var<storage, read_write> merge_meta: MergeMeta;
 
-@compute @workgroup_size(1)
+fn merge_partition(k: u32, slab_len: u32, input_len: u32) -> vec2<u32> {
+    var i_low: u32 = 0u;
+    if (k > input_len) {
+        i_low = k - input_len;
+    }
+    var i_high: u32 = k;
+    if (i_high > slab_len) {
+        i_high = slab_len;
+    }
+
+    var i: u32 = i_high;
+    var j: u32 = k - i;
+    loop {
+        let move_left = i > 0u && j < input_len && slab[i - 1u].key >= input[j].key;
+        let move_right = j > 0u && i < slab_len && input[j - 1u].key > slab[i].key;
+        if (move_left) {
+            i_high = i - 1u;
+            i = (i_low + i_high) / 2u;
+            j = k - i;
+            continue;
+        }
+        if (move_right) {
+            i_low = i + 1u;
+            i = (i_low + i_high + 1u) / 2u;
+            j = k - i;
+            continue;
+        }
+        break;
+    }
+    return vec2<u32>(i, j);
+}
+
+@compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x > 0u) {
+    let slab_len = slab_meta.len;
+    let input_len = input_meta.len;
+    let total_len = slab_len + input_len;
+    if (total_len == 0u) {
+        if (gid.x == 0u) {
+            merge_meta.len = 0u;
+        }
         return;
     }
 
-    var i: u32 = 0u;
-    var j: u32 = 0u;
-    var k: u32 = 0u;
-    let slab_len = slab_meta.len;
-    let input_len = input_meta.len;
+    let chunk_size: u32 = 256u;
+    let chunk_count = (total_len + chunk_size - 1u) / chunk_size;
+    let chunk_index = gid.x;
+    if (chunk_index >= chunk_count) {
+        return;
+    }
 
-    while (i < slab_len && j < input_len) {
-        let a = slab[i];
-        let b = input[j];
-        if (a.key < b.key) {
-            output[k] = a;
+    let k0 = chunk_index * chunk_size;
+    var k1 = k0 + chunk_size;
+    if (k1 > total_len) {
+        k1 = total_len;
+    }
+
+    let start = merge_partition(k0, slab_len, input_len);
+    let end = merge_partition(k1, slab_len, input_len);
+
+    var i = start.x;
+    var j = start.y;
+    var k = k0;
+
+    while (k < k1) {
+        if (i < end.x && j < end.y) {
+            let a = slab[i];
+            let b = input[j];
+            if (a.key < b.key) {
+                output[k] = a;
+                i = i + 1u;
+            } else {
+                output[k] = b;
+                j = j + 1u;
+            }
+        } else if (i < end.x) {
+            output[k] = slab[i];
             i = i + 1u;
-        } else if (a.key > b.key) {
-            output[k] = b;
-            j = j + 1u;
         } else {
-            output[k] = b;
-            i = i + 1u;
+            output[k] = input[j];
             j = j + 1u;
         }
         k = k + 1u;
     }
 
-    while (i < slab_len) {
-        output[k] = slab[i];
-        i = i + 1u;
-        k = k + 1u;
+    if (chunk_index == 0u) {
+        merge_meta.len = total_len;
     }
-
-    while (j < input_len) {
-        output[k] = input[j];
-        j = j + 1u;
-        k = k + 1u;
-    }
-
-    merge_meta.len = k;
 }
 "#;
 
