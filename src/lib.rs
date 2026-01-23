@@ -185,6 +185,18 @@ impl GpuSortedMap {
             })
             .collect()
     }
+
+    pub fn put(&mut self, key: u32, value: u32) -> Result<(), GpuMapError> {
+        let entry = KvEntry { key, value };
+        self.bulk_put(std::slice::from_ref(&entry))
+    }
+
+    pub fn get(&self, key: u32) -> Option<u32> {
+        self.host_slab
+            .binary_search_by_key(&key, |entry| entry.key)
+            .ok()
+            .map(|idx| self.host_slab[idx].value)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,5 +226,13 @@ mod tests {
 
         let results = map.bulk_get(&[7, 13, 42, 99]);
         assert_eq!(results, vec![Some(9), Some(1), Some(7), None]);
+    }
+
+    #[test]
+    fn single_put_then_get() {
+        let mut map = pollster::block_on(GpuSortedMap::new(4)).unwrap();
+        map.put(5, 11).unwrap();
+        assert_eq!(map.get(5), Some(11));
+        assert_eq!(map.get(9), None);
     }
 }
