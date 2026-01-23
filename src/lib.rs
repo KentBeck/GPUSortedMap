@@ -23,6 +23,7 @@ pub struct GpuSortedMap {
     pub meta_buffer: wgpu::Buffer,
     capacity: u32,
     len: u32,
+    host_slab: Vec<KvEntry>,
 }
 
 impl GpuSortedMap {
@@ -94,6 +95,7 @@ impl GpuSortedMap {
             meta_buffer,
             capacity,
             len: 0,
+            host_slab: Vec::with_capacity(capacity as usize),
         })
     }
 
@@ -115,15 +117,102 @@ impl GpuSortedMap {
         self.queue
             .write_buffer(&self.meta_buffer, 0, bytemuck::bytes_of(&meta));
     }
+
+    pub fn bulk_put(&mut self, entries: &[KvEntry]) -> Result<(), GpuMapError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let mut incoming_map = std::collections::BTreeMap::new();
+        for entry in entries {
+            incoming_map.insert(entry.key, entry.value);
+        }
+        let incoming: Vec<KvEntry> = incoming_map
+            .into_iter()
+            .map(|(key, value)| KvEntry { key, value })
+            .collect();
+
+        let mut merged = Vec::with_capacity(self.host_slab.len() + incoming.len());
+        let mut i = 0;
+        let mut j = 0;
+        while i < self.host_slab.len() && j < incoming.len() {
+            let current = self.host_slab[i];
+            let next = incoming[j];
+            if current.key < next.key {
+                merged.push(current);
+                i += 1;
+            } else if current.key > next.key {
+                merged.push(next);
+                j += 1;
+            } else {
+                merged.push(next);
+                i += 1;
+                j += 1;
+            }
+        }
+        if i < self.host_slab.len() {
+            merged.extend_from_slice(&self.host_slab[i..]);
+        }
+        if j < incoming.len() {
+            merged.extend_from_slice(&incoming[j..]);
+        }
+
+        let requested = merged.len() as u32;
+        if requested > self.capacity {
+            return Err(GpuMapError::CapacityExceeded {
+                capacity: self.capacity,
+                requested,
+            });
+        }
+
+        self.host_slab = merged;
+        self.update_len(requested);
+        self.queue.write_buffer(
+            &self.slab_buffer,
+            0,
+            bytemuck::cast_slice(&self.host_slab),
+        );
+        Ok(())
+    }
+
+    pub fn bulk_get(&self, keys: &[u32]) -> Vec<Option<u32>> {
+        keys.iter()
+            .map(|key| {
+                self.host_slab
+                    .binary_search_by_key(key, |entry| entry.key)
+                    .ok()
+                    .map(|idx| self.host_slab[idx].value)
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuMapError {
+    CapacityExceeded { capacity: u32, requested: u32 },
 }
 
 #[cfg(test)]
 mod tests {
-    use super::GpuSortedMap;
+    use super::{GpuSortedMap, KvEntry};
 
     #[test]
     fn creates_gpu_sorted_map() {
         let map = pollster::block_on(GpuSortedMap::new(1024));
         assert!(map.is_ok(), "GpuSortedMap::new should succeed");
+    }
+
+    #[test]
+    fn put_then_get() {
+        let mut map = pollster::block_on(GpuSortedMap::new(8)).unwrap();
+        let entries = [
+            KvEntry { key: 42, value: 7 },
+            KvEntry { key: 7, value: 9 },
+            KvEntry { key: 13, value: 1 },
+        ];
+        map.bulk_put(&entries).unwrap();
+
+        let results = map.bulk_get(&[7, 13, 42, 99]);
+        assert_eq!(results, vec![Some(9), Some(1), Some(7), None]);
     }
 }
