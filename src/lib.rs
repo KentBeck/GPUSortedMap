@@ -32,6 +32,31 @@ pub struct GpuArray<T: Pod> {
     _marker: PhantomData<T>,
 }
 
+pub struct GpuStorage<T: Pod> {
+    buffer: wgpu::Buffer,
+    _marker: PhantomData<T>,
+}
+
+impl<T: Pod> GpuStorage<T> {
+    pub fn new(device: &wgpu::Device, usage: wgpu::BufferUsages, label: &str) -> Self {
+        let size = std::mem::size_of::<T>() as u64;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size,
+            usage,
+            mapped_at_creation: false,
+        });
+        Self {
+            buffer,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn buffer(&self) -> &wgpu::Buffer {
+        &self.buffer
+    }
+}
+
 impl<T: Pod> GpuArray<T> {
     pub fn new(
         device: &wgpu::Device,
@@ -135,12 +160,25 @@ pub struct GpuSortedMap {
     pub slab: GpuArray<KvEntry>,
     pub input: GpuArray<KvEntry>,
     merge: GpuArray<KvEntry>,
-    merge_meta_buffer: wgpu::Buffer,
+    merge_meta: GpuStorage<MergeMeta>,
     bulk_get_pipeline: wgpu::ComputePipeline,
     bulk_get_bind_group_layout: wgpu::BindGroupLayout,
     bulk_merge_pipeline: wgpu::ComputePipeline,
     bulk_merge_bind_group_layout: wgpu::BindGroupLayout,
 }
+
+const BULK_GET_BIND_SLAB: u32 = 0;
+const BULK_GET_BIND_SLAB_META: u32 = 1;
+const BULK_GET_BIND_KEYS: u32 = 2;
+const BULK_GET_BIND_KEYS_META: u32 = 3;
+const BULK_GET_BIND_RESULTS: u32 = 4;
+
+const BULK_MERGE_BIND_SLAB: u32 = 0;
+const BULK_MERGE_BIND_INPUT: u32 = 1;
+const BULK_MERGE_BIND_OUTPUT: u32 = 2;
+const BULK_MERGE_BIND_SLAB_META: u32 = 3;
+const BULK_MERGE_BIND_INPUT_META: u32 = 4;
+const BULK_MERGE_BIND_MERGE_META: u32 = 5;
 
 impl GpuSortedMap {
     pub async fn new(capacity: u32) -> Result<Self, wgpu::RequestDeviceError> {
@@ -193,12 +231,11 @@ impl GpuSortedMap {
             "merge-buffer",
         );
 
-        let merge_meta_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("merge-meta-buffer"),
-            size: std::mem::size_of::<MergeMeta>() as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
+        let merge_meta = GpuStorage::new(
+            &device,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            "merge-meta-buffer",
+        );
 
         let bulk_get_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("bulk-get-shader"),
@@ -209,7 +246,7 @@ impl GpuSortedMap {
                 label: Some("bulk-get-bind-group-layout"),
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
-                        binding: 0,
+                        binding: BULK_GET_BIND_SLAB,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -219,7 +256,7 @@ impl GpuSortedMap {
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
-                        binding: 1,
+                        binding: BULK_GET_BIND_SLAB_META,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
@@ -229,7 +266,7 @@ impl GpuSortedMap {
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
-                        binding: 2,
+                        binding: BULK_GET_BIND_KEYS,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -239,7 +276,7 @@ impl GpuSortedMap {
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
-                        binding: 3,
+                        binding: BULK_GET_BIND_KEYS_META,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
@@ -249,7 +286,7 @@ impl GpuSortedMap {
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
-                        binding: 4,
+                        binding: BULK_GET_BIND_RESULTS,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: false },
@@ -283,7 +320,7 @@ impl GpuSortedMap {
                 label: Some("bulk-merge-bind-group-layout"),
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
-                        binding: 0,
+                        binding: BULK_MERGE_BIND_SLAB,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -293,7 +330,7 @@ impl GpuSortedMap {
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
-                        binding: 1,
+                        binding: BULK_MERGE_BIND_INPUT,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -303,7 +340,7 @@ impl GpuSortedMap {
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
-                        binding: 2,
+                        binding: BULK_MERGE_BIND_OUTPUT,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: false },
@@ -313,7 +350,7 @@ impl GpuSortedMap {
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
-                        binding: 3,
+                        binding: BULK_MERGE_BIND_SLAB_META,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
@@ -323,7 +360,7 @@ impl GpuSortedMap {
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
-                        binding: 4,
+                        binding: BULK_MERGE_BIND_INPUT_META,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
@@ -333,7 +370,7 @@ impl GpuSortedMap {
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
-                        binding: 5,
+                        binding: BULK_MERGE_BIND_MERGE_META,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: false },
@@ -365,7 +402,7 @@ impl GpuSortedMap {
             slab,
             input,
             merge,
-            merge_meta_buffer,
+            merge_meta,
             bulk_get_pipeline,
             bulk_get_bind_group_layout,
             bulk_merge_pipeline,
@@ -430,28 +467,28 @@ impl GpuSortedMap {
             layout: &self.bulk_merge_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
-                    binding: 0,
+                    binding: BULK_MERGE_BIND_SLAB,
                     resource: self.slab.buffer().as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 1,
+                    binding: BULK_MERGE_BIND_INPUT,
                     resource: self.input.buffer().as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 2,
+                    binding: BULK_MERGE_BIND_OUTPUT,
                     resource: self.merge.buffer().as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 3,
+                    binding: BULK_MERGE_BIND_SLAB_META,
                     resource: self.slab.meta_buffer().as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 4,
+                    binding: BULK_MERGE_BIND_INPUT_META,
                     resource: input_meta_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: self.merge_meta_buffer.as_entire_binding(),
+                    binding: BULK_MERGE_BIND_MERGE_META,
+                    resource: self.merge_meta.buffer().as_entire_binding(),
                 },
             ],
         });
@@ -487,7 +524,7 @@ impl GpuSortedMap {
             slab_bytes,
         );
         encoder.copy_buffer_to_buffer(
-            &self.merge_meta_buffer,
+            self.merge_meta.buffer(),
             0,
             &merge_readback,
             0,
@@ -544,23 +581,23 @@ impl GpuSortedMap {
             layout: &self.bulk_get_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
-                    binding: 0,
+                    binding: BULK_GET_BIND_SLAB,
                     resource: self.slab.buffer().as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 1,
+                    binding: BULK_GET_BIND_SLAB_META,
                     resource: self.slab.meta_buffer().as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 2,
+                    binding: BULK_GET_BIND_KEYS,
                     resource: keys_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 3,
+                    binding: BULK_GET_BIND_KEYS_META,
                     resource: keys_meta_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 4,
+                    binding: BULK_GET_BIND_RESULTS,
                     resource: results_buffer.as_entire_binding(),
                 },
             ],
