@@ -177,6 +177,29 @@ pub enum GpuMapError {
     TombstoneValueReserved { value: u32 },
 }
 
+impl std::fmt::Display for GpuMapError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GpuMapError::CapacityExceeded { capacity, requested } => {
+                write!(
+                    f,
+                    "Capacity exceeded: requested {} entries but capacity is {}",
+                    requested, capacity
+                )
+            }
+            GpuMapError::TombstoneValueReserved { value } => {
+                write!(
+                    f,
+                    "Value 0x{:08X} is reserved as tombstone marker and cannot be used",
+                    value
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for GpuMapError {}
+
 #[cfg(test)]
 mod tests {
     use super::{GpuSortedMap, KvEntry};
