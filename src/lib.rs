@@ -133,8 +133,8 @@ pub struct GpuSortedMap {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub slab: GpuArray<KvEntry>,
-    pub input_buffer: wgpu::Buffer,
-    merge_buffer: wgpu::Buffer,
+    pub input: GpuArray<KvEntry>,
+    merge: GpuArray<KvEntry>,
     merge_meta_buffer: wgpu::Buffer,
     bulk_get_pipeline: wgpu::ComputePipeline,
     bulk_get_bind_group_layout: wgpu::BindGroupLayout,
@@ -177,22 +177,21 @@ impl GpuSortedMap {
             "slab-buffer",
         );
 
-        let slab_size = (capacity as u64) * std::mem::size_of::<KvEntry>() as u64;
-        let input_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("input-buffer"),
-            size: slab_size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let input = GpuArray::new(
+            &device,
+            capacity,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            "input-buffer",
+        );
 
-        let merge_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("merge-buffer"),
-            size: slab_size,
-            usage: wgpu::BufferUsages::STORAGE
+        let merge = GpuArray::new(
+            &device,
+            capacity,
+            wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
+            "merge-buffer",
+        );
 
         let merge_meta_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("merge-meta-buffer"),
@@ -364,8 +363,8 @@ impl GpuSortedMap {
             device,
             queue,
             slab,
-            input_buffer,
-            merge_buffer,
+            input,
+            merge,
             merge_meta_buffer,
             bulk_get_pipeline,
             bulk_get_bind_group_layout,
@@ -409,8 +408,7 @@ impl GpuSortedMap {
             });
         }
 
-        self.queue
-            .write_buffer(&self.input_buffer, 0, bytemuck::cast_slice(&incoming));
+        self.input.write(&self.queue, &incoming);
         let input_meta = InputMeta {
             len: incoming.len() as u32,
             _pad: [0; 3],
@@ -437,11 +435,11 @@ impl GpuSortedMap {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: self.input_buffer.as_entire_binding(),
+                    resource: self.input.buffer().as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: self.merge_buffer.as_entire_binding(),
+                    resource: self.merge.buffer().as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
@@ -482,7 +480,7 @@ impl GpuSortedMap {
         let slab_bytes =
             (self.slab.capacity() as u64) * std::mem::size_of::<KvEntry>() as u64;
         encoder.copy_buffer_to_buffer(
-            &self.merge_buffer,
+            self.merge.buffer(),
             0,
             self.slab.buffer(),
             0,
