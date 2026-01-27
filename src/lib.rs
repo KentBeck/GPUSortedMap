@@ -237,4 +237,33 @@ mod tests {
         let err = map.put(1, 0xFFFF_FFFF).unwrap_err();
         assert!(matches!(err, super::GpuMapError::TombstoneValueReserved { .. }));
     }
+
+    #[test]
+    fn bulk_get_empty_keys() {
+        let map = pollster::block_on(GpuSortedMap::new(10)).unwrap();
+        let results = map.bulk_get(&[]);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn bulk_delete_empty_keys() {
+        let mut map = pollster::block_on(GpuSortedMap::new(10)).unwrap();
+        map.put(1, 10).unwrap();
+        map.bulk_delete(&[]);
+        assert_eq!(map.get(1), Some(10));
+    }
+
+    #[test]
+    fn bulk_put_internal_capacity_exceeded() {
+        // Map capacity 4. High-level check: len(0) + 3 <= 4. OK.
+        // Internal check: padded_len(3) -> 4. 4 <= 4. OK.
+        // Wait, if I use entries.len() = 5, high-level check (5 <= 4) fails.
+        // If I use capacity 6 and entries 5.
+        // High-level: 5 <= 6. OK.
+        // Internal: next_power_of_two(5) = 8. 8 > 6. FAIL.
+        let mut map = pollster::block_on(GpuSortedMap::new(6)).unwrap();
+        let entries = vec![KvEntry { key: 1, value: 1 }; 5];
+        let res = map.bulk_put(&entries);
+        assert!(matches!(res, Err(super::GpuMapError::CapacityExceeded { .. })));
+    }
 }

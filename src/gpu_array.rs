@@ -1,7 +1,7 @@
 use bytemuck::{Pod, Zeroable};
 use std::marker::PhantomData;
 
-use crate::pipeline::{create_buffer_with_data, readback_single, readback_vec};
+use crate::pipeline::create_buffer_with_data;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug, Default)]
@@ -165,7 +165,7 @@ mod tests {
         encoder.copy_buffer_to_buffer(source, 0, &readback, 0, byte_len);
         queue.submit(Some(encoder.finish()));
 
-        readback_vec::<T>(device, &readback)
+        crate::pipeline::readback_vec::<T>(device, &readback)
     }
 
     #[test]
@@ -225,5 +225,17 @@ mod tests {
             (data.len() * std::mem::size_of::<u32>()) as u64,
         );
         assert_eq!(readback, data);
+    }
+
+    #[test]
+    fn write_empty_does_nothing() {
+        let (device, queue) = pollster::block_on(create_device_queue());
+        let array = GpuArray::<u32>::new(
+            &device,
+            4,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            "test-buffer",
+        );
+        array.write(&queue, &[]);
     }
 }
