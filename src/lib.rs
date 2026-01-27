@@ -136,7 +136,7 @@ impl GpuSortedMap {
         Ok(())
     }
 
-    pub fn bulk_delete(&self, keys: &[u32]) {
+    pub fn bulk_delete(&mut self, keys: &[u32]) {
         self.bulk_delete.execute(&self.slab, keys);
     }
 
@@ -149,7 +149,7 @@ impl GpuSortedMap {
         self.bulk_put(std::slice::from_ref(&entry))
     }
 
-    pub fn delete(&self, key: u32) {
+    pub fn delete(&mut self, key: u32) {
         self.bulk_delete(std::slice::from_ref(&key));
     }
 
