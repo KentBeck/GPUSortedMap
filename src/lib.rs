@@ -161,6 +161,11 @@ impl GpuSortedMap {
         self.slab.len()
     }
 
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn update_len(&mut self, new_len: u32) {
         self.slab.update_len(&self.queue, new_len);
     }
@@ -265,5 +270,20 @@ mod tests {
         let entries = vec![KvEntry { key: 1, value: 1 }; 5];
         let res = map.bulk_put(&entries);
         assert!(matches!(res, Err(super::GpuMapError::CapacityExceeded { .. })));
+    }
+
+    #[test]
+    fn is_empty_returns_true_for_new_map() {
+        let map = pollster::block_on(GpuSortedMap::new(10)).unwrap();
+        assert!(map.is_empty());
+        assert_eq!(map.len(), 0);
+    }
+
+    #[test]
+    fn is_empty_returns_false_after_insert() {
+        let mut map = pollster::block_on(GpuSortedMap::new(10)).unwrap();
+        map.put(1, 10).unwrap();
+        assert!(!map.is_empty());
+        assert_eq!(map.len(), 1);
     }
 }
