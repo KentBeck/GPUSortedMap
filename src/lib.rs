@@ -290,6 +290,95 @@ impl BulkGetPipeline {
             ],
         })
     }
+
+    pub fn execute(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        slab: &GpuArray<KvEntry>,
+        keys: &[u32],
+    ) -> Vec<Option<u32>> {
+        if keys.is_empty() {
+            return Vec::new();
+        }
+
+        let keys_buffer = create_buffer_with_data(
+            device,
+            "keys-buffer",
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            keys,
+        );
+        let results_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("results-buffer"),
+            size: (keys.len() * std::mem::size_of::<ResultEntry>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let readback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("results-readback-buffer"),
+            size: (keys.len() * std::mem::size_of::<ResultEntry>()) as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let keys_meta = KeysMeta {
+            len: keys.len() as u32,
+            _pad: [0; 3],
+        };
+        let keys_meta_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("keys-meta-buffer"),
+            size: std::mem::size_of::<KeysMeta>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: true,
+        });
+        {
+            let mut view = keys_meta_buffer.slice(..).get_mapped_range_mut();
+            view.copy_from_slice(bytemuck::bytes_of(&keys_meta));
+        }
+        keys_meta_buffer.unmap();
+
+        let bind_group = self.bind_group(
+            device,
+            slab.buffer(),
+            slab.meta_buffer(),
+            &keys_buffer,
+            &keys_meta_buffer,
+            &results_buffer,
+        );
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("bulk-get-encoder"),
+        });
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("bulk-get-pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.pipeline);
+            cpass.set_bind_group(0, &bind_group, &[]);
+            let workgroups = ((keys.len() as u32) + 63) / 64;
+            cpass.dispatch_workgroups(workgroups, 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(
+            &results_buffer,
+            0,
+            &readback_buffer,
+            0,
+            (keys.len() * std::mem::size_of::<ResultEntry>()) as u64,
+        );
+        queue.submit(Some(encoder.finish()));
+
+        let result_entries = readback_vec::<ResultEntry>(device, &readback_buffer);
+        result_entries
+            .iter()
+            .map(|entry| {
+                if entry.found == 0 || entry.value == TOMBSTONE_VALUE {
+                    None
+                } else {
+                    Some(entry.value)
+                }
+            })
+            .collect()
+    }
 }
 
 const TOMBSTONE_VALUE: u32 = 0xFFFF_FFFF;
@@ -671,88 +760,8 @@ impl GpuSortedMap {
     }
 
     pub fn bulk_get(&self, keys: &[u32]) -> Vec<Option<u32>> {
-        if keys.is_empty() {
-            return Vec::new();
-        }
-
-        let keys_buffer = create_buffer_with_data(
-            &self.device,
-            "keys-buffer",
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            keys,
-        );
-        let results_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("results-buffer"),
-            size: (keys.len() * std::mem::size_of::<ResultEntry>()) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        let readback_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("results-readback-buffer"),
-            size: (keys.len() * std::mem::size_of::<ResultEntry>()) as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let keys_meta = KeysMeta {
-            len: keys.len() as u32,
-            _pad: [0; 3],
-        };
-        let keys_meta_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("keys-meta-buffer"),
-            size: std::mem::size_of::<KeysMeta>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: true,
-        });
-        {
-            let mut view = keys_meta_buffer.slice(..).get_mapped_range_mut();
-            view.copy_from_slice(bytemuck::bytes_of(&keys_meta));
-        }
-        keys_meta_buffer.unmap();
-
-        let bind_group = self.bulk_get.bind_group(
-            &self.device,
-            self.slab.buffer(),
-            self.slab.meta_buffer(),
-            &keys_buffer,
-            &keys_meta_buffer,
-            &results_buffer,
-        );
-
-        let mut encoder =
-            self.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("bulk-get-encoder"),
-                });
-        {
-            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("bulk-get-pass"),
-                timestamp_writes: None,
-            });
-            cpass.set_pipeline(&self.bulk_get.pipeline);
-            cpass.set_bind_group(0, &bind_group, &[]);
-            let workgroups = ((keys.len() as u32) + 63) / 64;
-            cpass.dispatch_workgroups(workgroups, 1, 1);
-        }
-        encoder.copy_buffer_to_buffer(
-            &results_buffer,
-            0,
-            &readback_buffer,
-            0,
-            (keys.len() * std::mem::size_of::<ResultEntry>()) as u64,
-        );
-        self.queue.submit(Some(encoder.finish()));
-
-        let result_entries = readback_vec::<ResultEntry>(&self.device, &readback_buffer);
-        result_entries
-            .iter()
-            .map(|entry| {
-                if entry.found == 0 || entry.value == TOMBSTONE_VALUE {
-                    None
-                } else {
-                    Some(entry.value)
-                }
-            })
-            .collect()
+        self.bulk_get
+            .execute(&self.device, &self.queue, &self.slab, keys)
     }
 
     pub fn bulk_delete(&self, keys: &[u32]) {
