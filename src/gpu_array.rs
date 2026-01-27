@@ -1,6 +1,8 @@
 use bytemuck::{Pod, Zeroable};
 use std::marker::PhantomData;
 
+use crate::pipeline::{create_buffer_with_data, readback_single, readback_vec};
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug, Default)]
 pub struct SlabMeta {
@@ -37,20 +39,14 @@ impl<T: Pod> GpuArray<T> {
             capacity,
             _pad: [0; 2],
         };
-        let meta_size = std::mem::size_of::<SlabMeta>() as u64;
-        let meta_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("slab-meta-buffer"),
-            size: meta_size,
-            usage: wgpu::BufferUsages::UNIFORM
+        let meta_buffer = create_buffer_with_data(
+            device,
+            "slab-meta-buffer",
+            wgpu::BufferUsages::UNIFORM
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: true,
-        });
-        {
-            let mut view = meta_buffer.slice(..).get_mapped_range_mut();
-            view.copy_from_slice(bytemuck::bytes_of(&meta));
-        }
-        meta_buffer.unmap();
+            &[meta],
+        );
 
         Self {
             buffer,
@@ -169,21 +165,7 @@ mod tests {
         encoder.copy_buffer_to_buffer(source, 0, &readback, 0, byte_len);
         queue.submit(Some(encoder.finish()));
 
-        let slice = readback.slice(..);
-        let (sender, receiver) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            sender.send(result).expect("send map result");
-        });
-        device.poll(wgpu::Maintain::Wait);
-        receiver
-            .recv()
-            .expect("receive map result")
-            .expect("map readback");
-        let data = slice.get_mapped_range();
-        let vec = bytemuck::cast_slice(&data).to_vec();
-        drop(data);
-        readback.unmap();
-        vec
+        readback_vec::<T>(device, &readback)
     }
 
     #[test]
