@@ -1,7 +1,7 @@
 use bytemuck::{Pod, Zeroable};
 use std::marker::PhantomData;
 
-use crate::pipeline::create_buffer_with_data;
+use crate::pipelines::utils::create_buffer_with_data;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug, Default)]
@@ -119,6 +119,7 @@ impl<T: Pod> GpuStorage<T> {
 #[cfg(test)]
 mod tests {
     use super::{GpuArray, SlabMeta};
+    use crate::pipelines::utils::readback_vec;
 
     async fn create_device_queue() -> (wgpu::Device, wgpu::Queue) {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -146,7 +147,7 @@ mod tests {
             .expect("failed to request device")
     }
 
-    fn readback_vec<T: bytemuck::Pod>(
+    fn readback_gpu_array<T: bytemuck::Pod>(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         source: &wgpu::Buffer,
@@ -165,7 +166,7 @@ mod tests {
         encoder.copy_buffer_to_buffer(source, 0, &readback, 0, byte_len);
         queue.submit(Some(encoder.finish()));
 
-        crate::pipeline::readback_vec::<T>(device, &readback)
+        readback_vec::<T>(device, &readback)
     }
 
     #[test]
@@ -194,7 +195,7 @@ mod tests {
         array.update_len(&queue, 10);
         assert_eq!(array.len(), 4);
 
-        let meta = readback_vec::<SlabMeta>(
+        let meta = readback_gpu_array::<SlabMeta>(
             &device,
             &queue,
             array.meta_buffer(),
@@ -218,7 +219,7 @@ mod tests {
         let data = [10_u32, 20, 30, 40];
         array.write(&queue, &data);
 
-        let readback = readback_vec::<u32>(
+        let readback = readback_gpu_array::<u32>(
             &device,
             &queue,
             array.buffer(),

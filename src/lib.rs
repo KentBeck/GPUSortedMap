@@ -1,11 +1,11 @@
 mod gpu_array;
-mod pipeline;
+mod pipelines;
 
 use bytemuck::{Pod, Zeroable};
 use std::sync::Arc;
 
 use crate::gpu_array::{GpuArray, GpuStorage};
-use crate::pipeline::{BulkDeletePipeline, BulkGetPipeline, BulkPutPipeline, MergeMeta, TOMBSTONE_VALUE};
+use crate::pipelines::{BulkDeletePipeline, BulkGetPipeline, BulkPutPipeline, MergeMeta, TOMBSTONE_VALUE};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug, Default)]
