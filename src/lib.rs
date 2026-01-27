@@ -172,10 +172,9 @@ pub struct DedupParams {
 }
 
 pub struct GpuSortedMap {
-    pub device: Arc<wgpu::Device>,
-    pub queue: wgpu::Queue,
-    pub slab: GpuArray<KvEntry>,
-    pub input: GpuArray<KvEntry>,
+    queue: Arc<wgpu::Queue>,
+    slab: GpuArray<KvEntry>,
+    input: GpuArray<KvEntry>,
     merge: GpuArray<KvEntry>,
     merge_meta: GpuStorage<MergeMeta>,
     bulk_get: BulkGetPipeline,
@@ -185,18 +184,21 @@ pub struct GpuSortedMap {
 
 pub struct BulkGetPipeline {
     device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
     pipeline: wgpu::ComputePipeline,
     bind_group_layout: wgpu::BindGroupLayout,
 }
 
 pub struct BulkDeletePipeline {
     device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
     pipeline: wgpu::ComputePipeline,
     bind_group_layout: wgpu::BindGroupLayout,
 }
 
 pub struct BulkPutPipeline {
     device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
     sort_pipeline: wgpu::ComputePipeline,
     sort_bind_group_layout: wgpu::BindGroupLayout,
     dedup_pipeline: wgpu::ComputePipeline,
@@ -205,7 +207,7 @@ pub struct BulkPutPipeline {
     merge_bind_group_layout: wgpu::BindGroupLayout,
 }
 impl BulkGetPipeline {
-    pub fn new(device: Arc<wgpu::Device>) -> Self {
+    pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
         let bulk_get_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("bulk-get-shader"),
             source: wgpu::ShaderSource::Wgsl(BULK_GET_WGSL.into()),
@@ -281,6 +283,7 @@ impl BulkGetPipeline {
 
         Self {
             device,
+            queue,
             pipeline,
             bind_group_layout,
         }
@@ -324,7 +327,6 @@ impl BulkGetPipeline {
 
     pub fn execute(
         &self,
-        queue: &wgpu::Queue,
         slab: &GpuArray<KvEntry>,
         keys: &[u32],
     ) -> Vec<Option<u32>> {
@@ -394,7 +396,7 @@ impl BulkGetPipeline {
             0,
             (keys.len() * std::mem::size_of::<ResultEntry>()) as u64,
         );
-        queue.submit(Some(encoder.finish()));
+        self.queue.submit(Some(encoder.finish()));
 
         let result_entries = readback_vec::<ResultEntry>(&self.device, &readback_buffer);
         result_entries
@@ -411,7 +413,7 @@ impl BulkGetPipeline {
 }
 
 impl BulkDeletePipeline {
-    pub fn new(device: Arc<wgpu::Device>) -> Self {
+    pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
         let bulk_delete_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("bulk-delete-shader"),
             source: wgpu::ShaderSource::Wgsl(BULK_DELETE_WGSL.into()),
@@ -477,6 +479,7 @@ impl BulkDeletePipeline {
 
         Self {
             device,
+            queue,
             pipeline,
             bind_group_layout,
         }
@@ -484,7 +487,6 @@ impl BulkDeletePipeline {
 
     pub fn execute(
         &self,
-        queue: &wgpu::Queue,
         slab: &GpuArray<KvEntry>,
         keys: &[u32],
     ) {
@@ -550,12 +552,12 @@ impl BulkDeletePipeline {
             let workgroups = ((keys.len() as u32) + 63) / 64;
             cpass.dispatch_workgroups(workgroups, 1, 1);
         }
-        queue.submit(Some(encoder.finish()));
+        self.queue.submit(Some(encoder.finish()));
     }
 }
 
 impl BulkPutPipeline {
-    pub fn new(device: Arc<wgpu::Device>) -> Self {
+    pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
         let sort_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("bulk-sort-shader"),
             source: wgpu::ShaderSource::Wgsl(BULK_SORT_WGSL.into()),
@@ -739,6 +741,7 @@ impl BulkPutPipeline {
 
         Self {
             device,
+            queue,
             sort_pipeline,
             sort_bind_group_layout,
             dedup_pipeline,
@@ -750,7 +753,6 @@ impl BulkPutPipeline {
 
     pub fn execute(
         &self,
-        queue: &wgpu::Queue,
         slab: &GpuArray<KvEntry>,
         input: &GpuArray<KvEntry>,
         merge: &GpuArray<KvEntry>,
@@ -776,7 +778,8 @@ impl BulkPutPipeline {
                 pad_count
             ];
             let offset = (len as u64) * std::mem::size_of::<KvEntry>() as u64;
-            queue.write_buffer(input.buffer(), offset, bytemuck::cast_slice(&padding));
+            self.queue
+                .write_buffer(input.buffer(), offset, bytemuck::cast_slice(&padding));
         }
 
         if len > 1 {
@@ -813,7 +816,8 @@ impl BulkPutPipeline {
                         len: padded_len,
                         _pad: 0,
                     };
-                    queue.write_buffer(&sort_params_buffer, 0, bytemuck::bytes_of(&params));
+                    self.queue
+                        .write_buffer(&sort_params_buffer, 0, bytemuck::bytes_of(&params));
                     let mut encoder =
                         self.device
                             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -830,7 +834,7 @@ impl BulkPutPipeline {
                         cpass.set_bind_group(0, &sort_bind_group, &[]);
                         cpass.dispatch_workgroups(workgroups, 1, 1);
                     }
-                    queue.submit(Some(encoder.finish()));
+                    self.queue.submit(Some(encoder.finish()));
                     j /= 2;
                 }
                 k *= 2;
@@ -894,7 +898,7 @@ impl BulkPutPipeline {
             0,
             std::mem::size_of::<MergeMeta>() as u64,
         );
-        queue.submit(Some(dedup_encoder.finish()));
+        self.queue.submit(Some(dedup_encoder.finish()));
         let dedup_meta = readback_vec::<MergeMeta>(&self.device, &dedup_readback);
         let dedup_len = dedup_meta.first().map(|m| m.len).unwrap_or(0);
 
@@ -974,7 +978,7 @@ impl BulkPutPipeline {
             0,
             std::mem::size_of::<MergeMeta>() as u64,
         );
-        queue.submit(Some(encoder.finish()));
+        self.queue.submit(Some(encoder.finish()));
 
         let merge_meta_vec = readback_vec::<MergeMeta>(&self.device, &merge_readback);
         Ok(merge_meta_vec.first().map(|m| m.len).unwrap_or(0))
@@ -1034,6 +1038,7 @@ impl GpuSortedMap {
             )
             .await?;
         let device = Arc::new(device);
+        let queue = Arc::new(queue);
 
         let slab = GpuArray::new(
             &device,
@@ -1066,12 +1071,11 @@ impl GpuSortedMap {
             "merge-meta-buffer",
         );
 
-        let bulk_get = BulkGetPipeline::new(Arc::clone(&device));
-        let bulk_delete = BulkDeletePipeline::new(Arc::clone(&device));
-        let bulk_put = BulkPutPipeline::new(Arc::clone(&device));
+        let bulk_get = BulkGetPipeline::new(Arc::clone(&device), Arc::clone(&queue));
+        let bulk_delete = BulkDeletePipeline::new(Arc::clone(&device), Arc::clone(&queue));
+        let bulk_put = BulkPutPipeline::new(Arc::clone(&device), Arc::clone(&queue));
 
         Ok(Self {
-            device,
             queue,
             slab,
             input,
@@ -1117,7 +1121,6 @@ impl GpuSortedMap {
 
         self.input.write(&self.queue, entries);
         let merge_len = self.bulk_put.execute(
-            &self.queue,
             &self.slab,
             &self.input,
             &self.merge,
@@ -1129,11 +1132,11 @@ impl GpuSortedMap {
     }
 
     pub fn bulk_get(&self, keys: &[u32]) -> Vec<Option<u32>> {
-        self.bulk_get.execute(&self.queue, &self.slab, keys)
+        self.bulk_get.execute(&self.slab, keys)
     }
 
     pub fn bulk_delete(&self, keys: &[u32]) {
-        self.bulk_delete.execute(&self.queue, &self.slab, keys);
+        self.bulk_delete.execute(&self.slab, keys);
     }
 
     pub fn delete(&self, key: u32) {
