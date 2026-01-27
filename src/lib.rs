@@ -1087,16 +1087,8 @@ impl GpuSortedMap {
         })
     }
 
-    pub fn capacity(&self) -> u32 {
-        self.slab.capacity()
-    }
-
-    pub fn len(&self) -> u32 {
-        self.slab.len()
-    }
-
-    pub fn update_len(&mut self, new_len: u32) {
-        self.slab.update_len(&self.queue, new_len);
+    pub fn bulk_get(&self, keys: &[u32]) -> Vec<Option<u32>> {
+        self.bulk_get.execute(&self.slab, keys)
     }
 
     pub fn bulk_put(&mut self, entries: &[KvEntry]) -> Result<(), GpuMapError> {
@@ -1131,16 +1123,12 @@ impl GpuSortedMap {
         Ok(())
     }
 
-    pub fn bulk_get(&self, keys: &[u32]) -> Vec<Option<u32>> {
-        self.bulk_get.execute(&self.slab, keys)
-    }
-
     pub fn bulk_delete(&self, keys: &[u32]) {
         self.bulk_delete.execute(&self.slab, keys);
     }
 
-    pub fn delete(&self, key: u32) {
-        self.bulk_delete(std::slice::from_ref(&key));
+    pub fn get(&self, key: u32) -> Option<u32> {
+        self.bulk_get(&[key]).into_iter().next().unwrap_or(None)
     }
 
     pub fn put(&mut self, key: u32, value: u32) -> Result<(), GpuMapError> {
@@ -1148,8 +1136,20 @@ impl GpuSortedMap {
         self.bulk_put(std::slice::from_ref(&entry))
     }
 
-    pub fn get(&self, key: u32) -> Option<u32> {
-        self.bulk_get(&[key]).into_iter().next().unwrap_or(None)
+    pub fn delete(&self, key: u32) {
+        self.bulk_delete(std::slice::from_ref(&key));
+    }
+
+    pub fn capacity(&self) -> u32 {
+        self.slab.capacity()
+    }
+
+    pub fn len(&self) -> u32 {
+        self.slab.len()
+    }
+
+    pub fn update_len(&mut self, new_len: u32) {
+        self.slab.update_len(&self.queue, new_len);
     }
 }
 
