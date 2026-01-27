@@ -1,4 +1,5 @@
 use bytemuck::{Pod, Zeroable};
+use std::marker::PhantomData;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug, Default)]
@@ -21,6 +22,90 @@ pub struct SlabMeta {
     pub len: u32,
     pub capacity: u32,
     pub _pad: [u32; 2],
+}
+
+pub struct GpuArray<T: Pod> {
+    buffer: wgpu::Buffer,
+    meta_buffer: wgpu::Buffer,
+    capacity: u32,
+    len: u32,
+    _marker: PhantomData<T>,
+}
+
+impl<T: Pod> GpuArray<T> {
+    pub fn new(
+        device: &wgpu::Device,
+        capacity: u32,
+        buffer_usage: wgpu::BufferUsages,
+        label: &str,
+    ) -> Self {
+        let size = (capacity as u64) * std::mem::size_of::<T>() as u64;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size,
+            usage: buffer_usage,
+            mapped_at_creation: false,
+        });
+
+        let meta = SlabMeta {
+            len: 0,
+            capacity,
+            _pad: [0; 2],
+        };
+        let meta_size = std::mem::size_of::<SlabMeta>() as u64;
+        let meta_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("slab-meta-buffer"),
+            size: meta_size,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: true,
+        });
+        {
+            let mut view = meta_buffer.slice(..).get_mapped_range_mut();
+            view.copy_from_slice(bytemuck::bytes_of(&meta));
+        }
+        meta_buffer.unmap();
+
+        Self {
+            buffer,
+            meta_buffer,
+            capacity,
+            len: 0,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn buffer(&self) -> &wgpu::Buffer {
+        &self.buffer
+    }
+
+    pub fn meta_buffer(&self) -> &wgpu::Buffer {
+        &self.meta_buffer
+    }
+
+    pub fn capacity(&self) -> u32 {
+        self.capacity
+    }
+
+    pub fn len(&self) -> u32 {
+        self.len
+    }
+
+    pub fn update_len(&mut self, queue: &wgpu::Queue, new_len: u32) {
+        self.len = new_len.min(self.capacity);
+        let meta = SlabMeta {
+            len: self.len,
+            capacity: self.capacity,
+            _pad: [0; 2],
+        };
+        queue.write_buffer(&self.meta_buffer, 0, bytemuck::bytes_of(&meta));
+    }
+
+    pub fn write(&self, queue: &wgpu::Queue, data: &[T]) {
+        if data.is_empty() {
+            return;
+        }
+        queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(data));
+    }
 }
 
 #[repr(C)]
@@ -47,17 +132,14 @@ pub struct MergeMeta {
 pub struct GpuSortedMap {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
-    pub slab_buffer: wgpu::Buffer,
+    pub slab: GpuArray<KvEntry>,
     pub input_buffer: wgpu::Buffer,
-    pub meta_buffer: wgpu::Buffer,
     merge_buffer: wgpu::Buffer,
     merge_meta_buffer: wgpu::Buffer,
     bulk_get_pipeline: wgpu::ComputePipeline,
     bulk_get_bind_group_layout: wgpu::BindGroupLayout,
     bulk_merge_pipeline: wgpu::ComputePipeline,
     bulk_merge_bind_group_layout: wgpu::BindGroupLayout,
-    capacity: u32,
-    len: u32,
 }
 
 impl GpuSortedMap {
@@ -86,40 +168,22 @@ impl GpuSortedMap {
             )
             .await?;
 
-        let slab_size = (capacity as u64) * std::mem::size_of::<KvEntry>() as u64;
-        let slab_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("slab-buffer"),
-            size: slab_size,
-            usage: wgpu::BufferUsages::STORAGE
+        let slab = GpuArray::new(
+            &device,
+            capacity,
+            wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
+            "slab-buffer",
+        );
 
+        let slab_size = (capacity as u64) * std::mem::size_of::<KvEntry>() as u64;
         let input_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("input-buffer"),
             size: slab_size,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-
-        let meta = SlabMeta {
-            len: 0,
-            capacity,
-            _pad: [0; 2],
-        };
-        let meta_size = std::mem::size_of::<SlabMeta>() as u64;
-        let meta_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("meta-buffer"),
-            size: meta_size,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: true,
-        });
-        {
-            let mut view = meta_buffer.slice(..).get_mapped_range_mut();
-            view.copy_from_slice(bytemuck::bytes_of(&meta));
-        }
-        meta_buffer.unmap();
 
         let merge_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("merge-buffer"),
@@ -299,37 +363,27 @@ impl GpuSortedMap {
         Ok(Self {
             device,
             queue,
-            slab_buffer,
+            slab,
             input_buffer,
-            meta_buffer,
             merge_buffer,
             merge_meta_buffer,
             bulk_get_pipeline,
             bulk_get_bind_group_layout,
             bulk_merge_pipeline,
             bulk_merge_bind_group_layout,
-            capacity,
-            len: 0,
         })
     }
 
     pub fn capacity(&self) -> u32 {
-        self.capacity
+        self.slab.capacity()
     }
 
     pub fn len(&self) -> u32 {
-        self.len
+        self.slab.len()
     }
 
     pub fn update_len(&mut self, new_len: u32) {
-        self.len = new_len.min(self.capacity);
-        let meta = SlabMeta {
-            len: self.len,
-            capacity: self.capacity,
-            _pad: [0; 2],
-        };
-        self.queue
-            .write_buffer(&self.meta_buffer, 0, bytemuck::bytes_of(&meta));
+        self.slab.update_len(&self.queue, new_len);
     }
 
     pub fn bulk_put(&mut self, entries: &[KvEntry]) -> Result<(), GpuMapError> {
@@ -347,21 +401,16 @@ impl GpuSortedMap {
             .map(|(key, value)| KvEntry { key, value })
             .collect();
 
-        let requested = self.len + incoming.len() as u32;
-        if requested > self.capacity {
+        let requested = self.slab.len() + incoming.len() as u32;
+        if requested > self.slab.capacity() {
             return Err(GpuMapError::CapacityExceeded {
-                capacity: self.capacity,
+                capacity: self.slab.capacity(),
                 requested,
             });
         }
 
-        if !incoming.is_empty() {
-            self.queue.write_buffer(
-                &self.input_buffer,
-                0,
-                bytemuck::cast_slice(&incoming),
-            );
-        }
+        self.queue
+            .write_buffer(&self.input_buffer, 0, bytemuck::cast_slice(&incoming));
         let input_meta = InputMeta {
             len: incoming.len() as u32,
             _pad: [0; 3],
@@ -384,7 +433,7 @@ impl GpuSortedMap {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: self.slab_buffer.as_entire_binding(),
+                    resource: self.slab.buffer().as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -396,7 +445,7 @@ impl GpuSortedMap {
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: self.meta_buffer.as_entire_binding(),
+                    resource: self.slab.meta_buffer().as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
@@ -430,8 +479,15 @@ impl GpuSortedMap {
             cpass.set_bind_group(0, &merge_bind_group, &[]);
             cpass.dispatch_workgroups(1, 1, 1);
         }
-        let slab_bytes = (self.capacity as u64) * std::mem::size_of::<KvEntry>() as u64;
-        encoder.copy_buffer_to_buffer(&self.merge_buffer, 0, &self.slab_buffer, 0, slab_bytes);
+        let slab_bytes =
+            (self.slab.capacity() as u64) * std::mem::size_of::<KvEntry>() as u64;
+        encoder.copy_buffer_to_buffer(
+            &self.merge_buffer,
+            0,
+            self.slab.buffer(),
+            0,
+            slab_bytes,
+        );
         encoder.copy_buffer_to_buffer(
             &self.merge_meta_buffer,
             0,
@@ -491,11 +547,11 @@ impl GpuSortedMap {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: self.slab_buffer.as_entire_binding(),
+                    resource: self.slab.buffer().as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: self.meta_buffer.as_entire_binding(),
+                    resource: self.slab.meta_buffer().as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
