@@ -6,6 +6,9 @@ use crate::KvEntry;
 
 pub const TOMBSTONE_VALUE: u32 = 0xFFFF_FFFF;
 
+// GPU compute shader workgroup size (must match @workgroup_size in shaders)
+const WORKGROUP_SIZE: u32 = 64;
+
 const BULK_GET_BIND_SLAB: u32 = 0;
 const BULK_GET_BIND_SLAB_META: u32 = 1;
 const BULK_GET_BIND_KEYS: u32 = 2;
@@ -272,7 +275,7 @@ impl BulkGetPipeline {
             });
             cpass.set_pipeline(&self.pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
-            let workgroups = ((keys.len() as u32) + 63) / 64;
+            let workgroups = (keys.len() as u32).div_ceil(WORKGROUP_SIZE);
             cpass.dispatch_workgroups(workgroups, 1, 1);
         }
         encoder.copy_buffer_to_buffer(
@@ -426,7 +429,7 @@ impl BulkDeletePipeline {
             });
             cpass.set_pipeline(&self.pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
-            let workgroups = ((keys.len() as u32) + 63) / 64;
+            let workgroups = (keys.len() as u32).div_ceil(WORKGROUP_SIZE);
             cpass.dispatch_workgroups(workgroups, 1, 1);
         }
         self.queue.submit(Some(encoder.finish()));
@@ -681,7 +684,7 @@ impl BulkPutPipeline {
                 ],
             });
 
-            let workgroups = ((padded_len + 63) / 64) as u32;
+            let workgroups = padded_len.div_ceil(WORKGROUP_SIZE);
             let mut k = 2u32;
             let max_k = padded_len;
             while k <= max_k {
@@ -859,7 +862,7 @@ pub fn create_buffer_with_data<T: Pod>(
     usage: wgpu::BufferUsages,
     data: &[T],
 ) -> wgpu::Buffer {
-    let size = (data.len() * std::mem::size_of::<T>()) as u64;
+    let size = std::mem::size_of_val(data) as u64;
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
         size,
