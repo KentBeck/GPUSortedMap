@@ -614,7 +614,8 @@ impl GpuSortedMap {
         );
         self.queue.submit(Some(encoder.finish()));
 
-        let merge_len = readback_merge_len(&self.device, &merge_readback);
+        let merge_meta = readback_vec::<MergeMeta>(&self.device, &merge_readback);
+        let merge_len = merge_meta.first().map(|m| m.len).unwrap_or(0);
         self.update_len(merge_len);
         Ok(())
     }
@@ -709,7 +710,7 @@ impl GpuSortedMap {
         );
         self.queue.submit(Some(encoder.finish()));
 
-        let result_entries = readback_results(&self.device, &readback_buffer);
+        let result_entries = readback_vec::<ResultEntry>(&self.device, &readback_buffer);
         result_entries
             .iter()
             .map(|entry| {
@@ -1070,7 +1071,7 @@ fn create_buffer_with_data<T: Pod>(
     buffer
 }
 
-fn readback_results(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Vec<ResultEntry> {
+fn readback_vec<T: Pod>(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Vec<T> {
     let slice = buffer.slice(..);
     let (sender, receiver) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |res| {
@@ -1083,22 +1084,6 @@ fn readback_results(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Vec<ResultE
     drop(data);
     buffer.unmap();
     results
-}
-
-fn readback_merge_len(device: &wgpu::Device, buffer: &wgpu::Buffer) -> u32 {
-    let slice = buffer.slice(..);
-    let (sender, receiver) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |res| {
-        let _ = sender.send(res);
-    });
-    device.poll(wgpu::Maintain::Wait);
-    receiver.recv().expect("readback channel closed").unwrap();
-    let data = slice.get_mapped_range();
-    let meta: &[MergeMeta] = bytemuck::cast_slice(&data);
-    let len = meta.first().map(|m| m.len).unwrap_or(0);
-    drop(data);
-    buffer.unmap();
-    len
 }
 
 #[cfg(test)]
