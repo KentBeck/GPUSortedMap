@@ -179,12 +179,7 @@ pub struct GpuSortedMap {
     merge_meta: GpuStorage<MergeMeta>,
     bulk_get: BulkGetPipeline,
     bulk_delete: BulkDeletePipeline,
-    bulk_sort_pipeline: wgpu::ComputePipeline,
-    bulk_sort_bind_group_layout: wgpu::BindGroupLayout,
-    bulk_dedup_pipeline: wgpu::ComputePipeline,
-    bulk_dedup_bind_group_layout: wgpu::BindGroupLayout,
-    bulk_merge_pipeline: wgpu::ComputePipeline,
-    bulk_merge_bind_group_layout: wgpu::BindGroupLayout,
+    bulk_put: BulkPutPipeline,
 }
 
 pub struct BulkGetPipeline {
@@ -197,6 +192,14 @@ pub struct BulkDeletePipeline {
     bind_group_layout: wgpu::BindGroupLayout,
 }
 
+pub struct BulkPutPipeline {
+    sort_pipeline: wgpu::ComputePipeline,
+    sort_bind_group_layout: wgpu::BindGroupLayout,
+    dedup_pipeline: wgpu::ComputePipeline,
+    dedup_bind_group_layout: wgpu::BindGroupLayout,
+    merge_pipeline: wgpu::ComputePipeline,
+    merge_bind_group_layout: wgpu::BindGroupLayout,
+}
 impl BulkGetPipeline {
     pub fn new(device: &wgpu::Device) -> Self {
         let bulk_get_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -549,6 +552,431 @@ impl BulkDeletePipeline {
     }
 }
 
+impl BulkPutPipeline {
+    pub fn new(device: &wgpu::Device) -> Self {
+        let sort_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("bulk-sort-shader"),
+            source: wgpu::ShaderSource::Wgsl(BULK_SORT_WGSL.into()),
+        });
+        let sort_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bulk-sort-bind-group-layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: BULK_SORT_BIND_INPUT,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: BULK_SORT_BIND_PARAMS,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+        let sort_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("bulk-sort-pipeline-layout"),
+            bind_group_layouts: &[&sort_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+        let sort_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("bulk-sort-pipeline"),
+            layout: Some(&sort_pipeline_layout),
+            module: &sort_shader,
+            entry_point: "main",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        });
+
+        let dedup_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("bulk-dedup-shader"),
+            source: wgpu::ShaderSource::Wgsl(BULK_DEDUP_WGSL.into()),
+        });
+        let dedup_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bulk-dedup-bind-group-layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: BULK_DEDUP_BIND_INPUT,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: BULK_DEDUP_BIND_PARAMS,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: BULK_DEDUP_BIND_META,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+        let dedup_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("bulk-dedup-pipeline-layout"),
+                bind_group_layouts: &[&dedup_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+        let dedup_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("bulk-dedup-pipeline"),
+            layout: Some(&dedup_pipeline_layout),
+            module: &dedup_shader,
+            entry_point: "main",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        });
+
+        let merge_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("bulk-merge-shader"),
+            source: wgpu::ShaderSource::Wgsl(BULK_MERGE_WGSL.into()),
+        });
+        let merge_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bulk-merge-bind-group-layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: BULK_MERGE_BIND_SLAB,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: BULK_MERGE_BIND_INPUT,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: BULK_MERGE_BIND_OUTPUT,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: BULK_MERGE_BIND_SLAB_META,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: BULK_MERGE_BIND_INPUT_META,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: BULK_MERGE_BIND_MERGE_META,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+        let merge_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("bulk-merge-pipeline-layout"),
+                bind_group_layouts: &[&merge_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+        let merge_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("bulk-merge-pipeline"),
+            layout: Some(&merge_pipeline_layout),
+            module: &merge_shader,
+            entry_point: "main",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        });
+
+        Self {
+            sort_pipeline,
+            sort_bind_group_layout,
+            dedup_pipeline,
+            dedup_bind_group_layout,
+            merge_pipeline,
+            merge_bind_group_layout,
+        }
+    }
+
+    pub fn execute(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        slab: &GpuArray<KvEntry>,
+        input: &GpuArray<KvEntry>,
+        merge: &GpuArray<KvEntry>,
+        merge_meta: &GpuStorage<MergeMeta>,
+        entries_len: u32,
+    ) -> Result<u32, GpuMapError> {
+        let len = entries_len;
+        let padded_len = len.next_power_of_two();
+        if padded_len > slab.capacity() {
+            return Err(GpuMapError::CapacityExceeded {
+                capacity: slab.capacity(),
+                requested: slab.len() + padded_len,
+            });
+        }
+
+        if padded_len > len {
+            let pad_count = (padded_len - len) as usize;
+            let padding = vec![
+                KvEntry {
+                    key: u32::MAX,
+                    value: 0,
+                };
+                pad_count
+            ];
+            let offset = (len as u64) * std::mem::size_of::<KvEntry>() as u64;
+            queue.write_buffer(input.buffer(), offset, bytemuck::cast_slice(&padding));
+        }
+
+        if len > 1 {
+            let sort_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("bulk-sort-params"),
+                size: std::mem::size_of::<SortParams>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let sort_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("bulk-sort-bind-group"),
+                layout: &self.sort_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: BULK_SORT_BIND_INPUT,
+                        resource: input.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: BULK_SORT_BIND_PARAMS,
+                        resource: sort_params_buffer.as_entire_binding(),
+                    },
+                ],
+            });
+
+            let workgroups = ((padded_len + 63) / 64) as u32;
+            let mut k = 2u32;
+            let max_k = padded_len;
+            while k <= max_k {
+                let mut j = k / 2;
+                while j > 0 {
+                    let params = SortParams {
+                        k,
+                        j,
+                        len: padded_len,
+                        _pad: 0,
+                    };
+                    queue.write_buffer(&sort_params_buffer, 0, bytemuck::bytes_of(&params));
+                    let mut encoder =
+                        device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("bulk-sort-encoder"),
+                        });
+                    {
+                        let mut cpass = encoder.begin_compute_pass(
+                            &wgpu::ComputePassDescriptor {
+                                label: Some("bulk-sort-pass"),
+                                timestamp_writes: None,
+                            },
+                        );
+                        cpass.set_pipeline(&self.sort_pipeline);
+                        cpass.set_bind_group(0, &sort_bind_group, &[]);
+                        cpass.dispatch_workgroups(workgroups, 1, 1);
+                    }
+                    queue.submit(Some(encoder.finish()));
+                    j /= 2;
+                }
+                k *= 2;
+            }
+        }
+
+        let dedup_params = DedupParams { len, _pad: [0; 3] };
+        let dedup_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bulk-dedup-params"),
+            size: std::mem::size_of::<DedupParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: true,
+        });
+        {
+            let mut view = dedup_params_buffer.slice(..).get_mapped_range_mut();
+            view.copy_from_slice(bytemuck::bytes_of(&dedup_params));
+        }
+        dedup_params_buffer.unmap();
+        let dedup_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bulk-dedup-bind-group"),
+            layout: &self.dedup_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: BULK_DEDUP_BIND_INPUT,
+                    resource: input.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: BULK_DEDUP_BIND_PARAMS,
+                    resource: dedup_params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: BULK_DEDUP_BIND_META,
+                    resource: merge_meta.buffer().as_entire_binding(),
+                },
+            ],
+        });
+        let dedup_readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bulk-dedup-readback"),
+            size: std::mem::size_of::<MergeMeta>() as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut dedup_encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("bulk-dedup-encoder"),
+            });
+        {
+            let mut cpass = dedup_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("bulk-dedup-pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.dedup_pipeline);
+            cpass.set_bind_group(0, &dedup_bind_group, &[]);
+            cpass.dispatch_workgroups(1, 1, 1);
+        }
+        dedup_encoder.copy_buffer_to_buffer(
+            merge_meta.buffer(),
+            0,
+            &dedup_readback,
+            0,
+            std::mem::size_of::<MergeMeta>() as u64,
+        );
+        queue.submit(Some(dedup_encoder.finish()));
+        let dedup_meta = readback_vec::<MergeMeta>(device, &dedup_readback);
+        let dedup_len = dedup_meta.first().map(|m| m.len).unwrap_or(0);
+
+        let input_meta = InputMeta {
+            len: dedup_len,
+            _pad: [0; 3],
+        };
+        let input_meta_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("input-meta-buffer"),
+            size: std::mem::size_of::<InputMeta>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: true,
+        });
+        {
+            let mut view = input_meta_buffer.slice(..).get_mapped_range_mut();
+            view.copy_from_slice(bytemuck::bytes_of(&input_meta));
+        }
+        input_meta_buffer.unmap();
+
+        let merge_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bulk-merge-bind-group"),
+            layout: &self.merge_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: BULK_MERGE_BIND_SLAB,
+                    resource: slab.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: BULK_MERGE_BIND_INPUT,
+                    resource: input.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: BULK_MERGE_BIND_OUTPUT,
+                    resource: merge.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: BULK_MERGE_BIND_SLAB_META,
+                    resource: slab.meta_buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: BULK_MERGE_BIND_INPUT_META,
+                    resource: input_meta_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: BULK_MERGE_BIND_MERGE_META,
+                    resource: merge_meta.buffer().as_entire_binding(),
+                },
+            ],
+        });
+
+        let merge_readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("merge-meta-readback"),
+            size: std::mem::size_of::<MergeMeta>() as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("bulk-merge-encoder"),
+        });
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("bulk-merge-pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.merge_pipeline);
+            cpass.set_bind_group(0, &merge_bind_group, &[]);
+            cpass.dispatch_workgroups(1, 1, 1);
+        }
+
+        let slab_bytes = (slab.capacity() as u64) * std::mem::size_of::<KvEntry>() as u64;
+        encoder.copy_buffer_to_buffer(merge.buffer(), 0, slab.buffer(), 0, slab_bytes);
+        encoder.copy_buffer_to_buffer(
+            merge_meta.buffer(),
+            0,
+            &merge_readback,
+            0,
+            std::mem::size_of::<MergeMeta>() as u64,
+        );
+        queue.submit(Some(encoder.finish()));
+
+        let merge_meta_vec = readback_vec::<MergeMeta>(device, &merge_readback);
+        Ok(merge_meta_vec.first().map(|m| m.len).unwrap_or(0))
+    }
+}
+
 const TOMBSTONE_VALUE: u32 = 0xFFFF_FFFF;
 
 const BULK_GET_BIND_SLAB: u32 = 0;
@@ -635,189 +1063,7 @@ impl GpuSortedMap {
 
         let bulk_get = BulkGetPipeline::new(&device);
         let bulk_delete = BulkDeletePipeline::new(&device);
-
-        let bulk_sort_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("bulk-sort-shader"),
-            source: wgpu::ShaderSource::Wgsl(BULK_SORT_WGSL.into()),
-        });
-        let bulk_sort_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("bulk-sort-bind-group-layout"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: BULK_SORT_BIND_INPUT,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: BULK_SORT_BIND_PARAMS,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                ],
-            });
-        let bulk_sort_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("bulk-sort-pipeline-layout"),
-                bind_group_layouts: &[&bulk_sort_bind_group_layout],
-                push_constant_ranges: &[],
-            });
-        let bulk_sort_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("bulk-sort-pipeline"),
-            layout: Some(&bulk_sort_pipeline_layout),
-            module: &bulk_sort_shader,
-            entry_point: "main",
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        });
-
-        let bulk_dedup_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("bulk-dedup-shader"),
-            source: wgpu::ShaderSource::Wgsl(BULK_DEDUP_WGSL.into()),
-        });
-        let bulk_dedup_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("bulk-dedup-bind-group-layout"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: BULK_DEDUP_BIND_INPUT,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: BULK_DEDUP_BIND_PARAMS,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: BULK_DEDUP_BIND_META,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                ],
-            });
-        let bulk_dedup_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("bulk-dedup-pipeline-layout"),
-                bind_group_layouts: &[&bulk_dedup_bind_group_layout],
-                push_constant_ranges: &[],
-            });
-        let bulk_dedup_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("bulk-dedup-pipeline"),
-            layout: Some(&bulk_dedup_pipeline_layout),
-            module: &bulk_dedup_shader,
-            entry_point: "main",
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        });
-
-        let bulk_merge_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("bulk-merge-shader"),
-            source: wgpu::ShaderSource::Wgsl(BULK_MERGE_WGSL.into()),
-        });
-        let bulk_merge_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("bulk-merge-bind-group-layout"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: BULK_MERGE_BIND_SLAB,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: BULK_MERGE_BIND_INPUT,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: BULK_MERGE_BIND_OUTPUT,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: BULK_MERGE_BIND_SLAB_META,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: BULK_MERGE_BIND_INPUT_META,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: BULK_MERGE_BIND_MERGE_META,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                ],
-            });
-        let bulk_merge_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("bulk-merge-pipeline-layout"),
-                bind_group_layouts: &[&bulk_merge_bind_group_layout],
-                push_constant_ranges: &[],
-            });
-        let bulk_merge_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("bulk-merge-pipeline"),
-                layout: Some(&bulk_merge_pipeline_layout),
-                module: &bulk_merge_shader,
-                entry_point: "main",
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            });
+        let bulk_put = BulkPutPipeline::new(&device);
 
         Ok(Self {
             device,
@@ -828,12 +1074,7 @@ impl GpuSortedMap {
             merge_meta,
             bulk_get,
             bulk_delete,
-            bulk_sort_pipeline,
-            bulk_sort_bind_group_layout,
-            bulk_dedup_pipeline,
-            bulk_dedup_bind_group_layout,
-            bulk_merge_pipeline,
-            bulk_merge_bind_group_layout,
+            bulk_put,
         })
     }
 
@@ -861,7 +1102,6 @@ impl GpuSortedMap {
         }
 
         let len = entries.len() as u32;
-        let padded_len = len.next_power_of_two();
         let requested = self.slab.len() + len;
         if requested > self.slab.capacity() {
             return Err(GpuMapError::CapacityExceeded {
@@ -869,239 +1109,17 @@ impl GpuSortedMap {
                 requested,
             });
         }
-        if padded_len > self.slab.capacity() {
-            return Err(GpuMapError::CapacityExceeded {
-                capacity: self.slab.capacity(),
-                requested: self.slab.len() + padded_len,
-            });
-        }
 
         self.input.write(&self.queue, entries);
-        if padded_len > len {
-            let pad_count = (padded_len - len) as usize;
-            let padding = vec![
-                KvEntry {
-                    key: u32::MAX,
-                    value: 0,
-                };
-                pad_count
-            ];
-            let offset = (len as u64) * std::mem::size_of::<KvEntry>() as u64;
-            self.queue.write_buffer(
-                self.input.buffer(),
-                offset,
-                bytemuck::cast_slice(&padding),
-            );
-        }
-
-        if len > 1 {
-            let sort_params_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("bulk-sort-params"),
-                size: std::mem::size_of::<SortParams>() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            let sort_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("bulk-sort-bind-group"),
-                layout: &self.bulk_sort_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: BULK_SORT_BIND_INPUT,
-                        resource: self.input.buffer().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: BULK_SORT_BIND_PARAMS,
-                        resource: sort_params_buffer.as_entire_binding(),
-                    },
-                ],
-            });
-
-            let workgroups = ((padded_len + 63) / 64) as u32;
-            let mut k = 2u32;
-            let max_k = padded_len;
-            while k <= max_k {
-                let mut j = k / 2;
-                while j > 0 {
-                    let params = SortParams {
-                        k,
-                        j,
-                        len: padded_len,
-                        _pad: 0,
-                    };
-                    self.queue
-                        .write_buffer(&sort_params_buffer, 0, bytemuck::bytes_of(&params));
-                    let mut encoder =
-                        self.device
-                            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                                label: Some("bulk-sort-encoder"),
-                            });
-                    {
-                        let mut cpass = encoder.begin_compute_pass(
-                            &wgpu::ComputePassDescriptor {
-                                label: Some("bulk-sort-pass"),
-                                timestamp_writes: None,
-                            },
-                        );
-                        cpass.set_pipeline(&self.bulk_sort_pipeline);
-                        cpass.set_bind_group(0, &sort_bind_group, &[]);
-                        cpass.dispatch_workgroups(workgroups, 1, 1);
-                    }
-                    self.queue.submit(Some(encoder.finish()));
-                    j /= 2;
-                }
-                k *= 2;
-            }
-        }
-
-        let dedup_params = DedupParams { len, _pad: [0; 3] };
-        let dedup_params_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("bulk-dedup-params"),
-            size: std::mem::size_of::<DedupParams>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: true,
-        });
-        {
-            let mut view = dedup_params_buffer.slice(..).get_mapped_range_mut();
-            view.copy_from_slice(bytemuck::bytes_of(&dedup_params));
-        }
-        dedup_params_buffer.unmap();
-        let dedup_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bulk-dedup-bind-group"),
-            layout: &self.bulk_dedup_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: BULK_DEDUP_BIND_INPUT,
-                    resource: self.input.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: BULK_DEDUP_BIND_PARAMS,
-                    resource: dedup_params_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: BULK_DEDUP_BIND_META,
-                    resource: self.merge_meta.buffer().as_entire_binding(),
-                },
-            ],
-        });
-        let dedup_readback = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("bulk-dedup-readback"),
-            size: std::mem::size_of::<MergeMeta>() as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut dedup_encoder =
-            self.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("bulk-dedup-encoder"),
-                });
-        {
-            let mut cpass = dedup_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("bulk-dedup-pass"),
-                timestamp_writes: None,
-            });
-            cpass.set_pipeline(&self.bulk_dedup_pipeline);
-            cpass.set_bind_group(0, &dedup_bind_group, &[]);
-            cpass.dispatch_workgroups(1, 1, 1);
-        }
-        dedup_encoder.copy_buffer_to_buffer(
-            self.merge_meta.buffer(),
-            0,
-            &dedup_readback,
-            0,
-            std::mem::size_of::<MergeMeta>() as u64,
-        );
-        self.queue.submit(Some(dedup_encoder.finish()));
-        let dedup_meta = readback_vec::<MergeMeta>(&self.device, &dedup_readback);
-        let dedup_len = dedup_meta.first().map(|m| m.len).unwrap_or(0);
-
-        let input_meta = InputMeta {
-            len: dedup_len,
-            _pad: [0; 3],
-        };
-        let input_meta_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("input-meta-buffer"),
-            size: std::mem::size_of::<InputMeta>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: true,
-        });
-        {
-            let mut view = input_meta_buffer.slice(..).get_mapped_range_mut();
-            view.copy_from_slice(bytemuck::bytes_of(&input_meta));
-        }
-        input_meta_buffer.unmap();
-
-        let merge_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bulk-merge-bind-group"),
-            layout: &self.bulk_merge_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: BULK_MERGE_BIND_SLAB,
-                    resource: self.slab.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: BULK_MERGE_BIND_INPUT,
-                    resource: self.input.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: BULK_MERGE_BIND_OUTPUT,
-                    resource: self.merge.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: BULK_MERGE_BIND_SLAB_META,
-                    resource: self.slab.meta_buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: BULK_MERGE_BIND_INPUT_META,
-                    resource: input_meta_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: BULK_MERGE_BIND_MERGE_META,
-                    resource: self.merge_meta.buffer().as_entire_binding(),
-                },
-            ],
-        });
-
-        let merge_readback = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("merge-meta-readback"),
-            size: std::mem::size_of::<MergeMeta>() as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
-        let mut encoder =
-            self.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("bulk-merge-encoder"),
-                });
-        {
-            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("bulk-merge-pass"),
-                timestamp_writes: None,
-            });
-            cpass.set_pipeline(&self.bulk_merge_pipeline);
-            cpass.set_bind_group(0, &merge_bind_group, &[]);
-            cpass.dispatch_workgroups(1, 1, 1);
-        }
-        let slab_bytes =
-            (self.slab.capacity() as u64) * std::mem::size_of::<KvEntry>() as u64;
-        encoder.copy_buffer_to_buffer(
-            self.merge.buffer(),
-            0,
-            self.slab.buffer(),
-            0,
-            slab_bytes,
-        );
-        encoder.copy_buffer_to_buffer(
-            self.merge_meta.buffer(),
-            0,
-            &merge_readback,
-            0,
-            std::mem::size_of::<MergeMeta>() as u64,
-        );
-        self.queue.submit(Some(encoder.finish()));
-
-        let merge_meta = readback_vec::<MergeMeta>(&self.device, &merge_readback);
-        let merge_len = merge_meta.first().map(|m| m.len).unwrap_or(0);
+        let merge_len = self.bulk_put.execute(
+            &self.device,
+            &self.queue,
+            &self.slab,
+            &self.input,
+            &self.merge,
+            &self.merge_meta,
+            len,
+        )?;
         self.update_len(merge_len);
         Ok(())
     }
