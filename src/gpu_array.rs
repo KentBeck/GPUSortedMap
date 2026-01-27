@@ -41,7 +41,9 @@ impl<T: Pod> GpuArray<T> {
         let meta_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("slab-meta-buffer"),
             size: meta_size,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::UNIFORM
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: true,
         });
         {
@@ -115,5 +117,131 @@ impl<T: Pod> GpuStorage<T> {
 
     pub fn buffer(&self) -> &wgpu::Buffer {
         &self.buffer
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GpuArray, SlabMeta};
+
+    async fn create_device_queue() -> (wgpu::Device, wgpu::Queue) {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..Default::default()
+        });
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::LowPower,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            })
+            .await
+            .expect("no suitable GPU adapters found");
+        adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("gpu-array-test-device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::default(),
+                },
+                None,
+            )
+            .await
+            .expect("failed to request device")
+    }
+
+    fn readback_vec<T: bytemuck::Pod>(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        source: &wgpu::Buffer,
+        byte_len: u64,
+    ) -> Vec<T> {
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("gpu-array-readback"),
+            size: byte_len,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("gpu-array-readback-encoder"),
+        });
+        encoder.copy_buffer_to_buffer(source, 0, &readback, 0, byte_len);
+        queue.submit(Some(encoder.finish()));
+
+        let slice = readback.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            sender.send(result).expect("send map result");
+        });
+        device.poll(wgpu::Maintain::Wait);
+        receiver
+            .recv()
+            .expect("receive map result")
+            .expect("map readback");
+        let data = slice.get_mapped_range();
+        let vec = bytemuck::cast_slice(&data).to_vec();
+        drop(data);
+        readback.unmap();
+        vec
+    }
+
+    #[test]
+    fn creates_with_capacity() {
+        let (device, _queue) = pollster::block_on(create_device_queue());
+        let array = GpuArray::<u32>::new(
+            &device,
+            4,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            "test-buffer",
+        );
+        assert_eq!(array.capacity(), 4);
+        assert_eq!(array.len(), 0);
+    }
+
+    #[test]
+    fn update_len_clamps_and_updates_meta() {
+        let (device, queue) = pollster::block_on(create_device_queue());
+        let mut array = GpuArray::<u32>::new(
+            &device,
+            4,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            "test-buffer",
+        );
+
+        array.update_len(&queue, 10);
+        assert_eq!(array.len(), 4);
+
+        let meta = readback_vec::<SlabMeta>(
+            &device,
+            &queue,
+            array.meta_buffer(),
+            std::mem::size_of::<SlabMeta>() as u64,
+        );
+        assert_eq!(meta.len(), 1);
+        assert_eq!(meta[0].len, 4);
+        assert_eq!(meta[0].capacity, 4);
+    }
+
+    #[test]
+    fn write_persists_data() {
+        let (device, queue) = pollster::block_on(create_device_queue());
+        let array = GpuArray::<u32>::new(
+            &device,
+            4,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            "test-buffer",
+        );
+
+        let data = [10_u32, 20, 30, 40];
+        array.write(&queue, &data);
+
+        let readback = readback_vec::<u32>(
+            &device,
+            &queue,
+            array.buffer(),
+            (data.len() * std::mem::size_of::<u32>()) as u64,
+        );
+        assert_eq!(readback, data);
     }
 }
