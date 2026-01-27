@@ -154,6 +154,22 @@ pub struct MergeMeta {
     pub _pad: [u32; 3],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug, Default)]
+pub struct SortParams {
+    pub k: u32,
+    pub j: u32,
+    pub len: u32,
+    pub _pad: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug, Default)]
+pub struct DedupParams {
+    pub len: u32,
+    pub _pad: [u32; 3],
+}
+
 pub struct GpuSortedMap {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
@@ -163,6 +179,10 @@ pub struct GpuSortedMap {
     merge_meta: GpuStorage<MergeMeta>,
     bulk_get: BulkGetPipeline,
     bulk_delete: BulkDeletePipeline,
+    bulk_sort_pipeline: wgpu::ComputePipeline,
+    bulk_sort_bind_group_layout: wgpu::BindGroupLayout,
+    bulk_dedup_pipeline: wgpu::ComputePipeline,
+    bulk_dedup_bind_group_layout: wgpu::BindGroupLayout,
     bulk_merge_pipeline: wgpu::ComputePipeline,
     bulk_merge_bind_group_layout: wgpu::BindGroupLayout,
 }
@@ -542,6 +562,13 @@ const BULK_DELETE_BIND_SLAB_META: u32 = 1;
 const BULK_DELETE_BIND_KEYS: u32 = 2;
 const BULK_DELETE_BIND_KEYS_META: u32 = 3;
 
+const BULK_SORT_BIND_INPUT: u32 = 0;
+const BULK_SORT_BIND_PARAMS: u32 = 1;
+
+const BULK_DEDUP_BIND_INPUT: u32 = 0;
+const BULK_DEDUP_BIND_PARAMS: u32 = 1;
+const BULK_DEDUP_BIND_META: u32 = 2;
+
 const BULK_MERGE_BIND_SLAB: u32 = 0;
 const BULK_MERGE_BIND_INPUT: u32 = 1;
 const BULK_MERGE_BIND_OUTPUT: u32 = 2;
@@ -608,6 +635,104 @@ impl GpuSortedMap {
 
         let bulk_get = BulkGetPipeline::new(&device);
         let bulk_delete = BulkDeletePipeline::new(&device);
+
+        let bulk_sort_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("bulk-sort-shader"),
+            source: wgpu::ShaderSource::Wgsl(BULK_SORT_WGSL.into()),
+        });
+        let bulk_sort_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bulk-sort-bind-group-layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: BULK_SORT_BIND_INPUT,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: BULK_SORT_BIND_PARAMS,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+        let bulk_sort_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("bulk-sort-pipeline-layout"),
+                bind_group_layouts: &[&bulk_sort_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+        let bulk_sort_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("bulk-sort-pipeline"),
+            layout: Some(&bulk_sort_pipeline_layout),
+            module: &bulk_sort_shader,
+            entry_point: "main",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        });
+
+        let bulk_dedup_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("bulk-dedup-shader"),
+            source: wgpu::ShaderSource::Wgsl(BULK_DEDUP_WGSL.into()),
+        });
+        let bulk_dedup_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bulk-dedup-bind-group-layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: BULK_DEDUP_BIND_INPUT,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: BULK_DEDUP_BIND_PARAMS,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: BULK_DEDUP_BIND_META,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+        let bulk_dedup_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("bulk-dedup-pipeline-layout"),
+                bind_group_layouts: &[&bulk_dedup_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+        let bulk_dedup_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("bulk-dedup-pipeline"),
+            layout: Some(&bulk_dedup_pipeline_layout),
+            module: &bulk_dedup_shader,
+            entry_point: "main",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        });
 
         let bulk_merge_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("bulk-merge-shader"),
@@ -703,6 +828,10 @@ impl GpuSortedMap {
             merge_meta,
             bulk_get,
             bulk_delete,
+            bulk_sort_pipeline,
+            bulk_sort_bind_group_layout,
+            bulk_dedup_pipeline,
+            bulk_dedup_bind_group_layout,
             bulk_merge_pipeline,
             bulk_merge_bind_group_layout,
         })
@@ -731,27 +860,162 @@ impl GpuSortedMap {
             });
         }
 
-        // TODO: Decide whether bulk_put should accept duplicate keys (e.g., last-write-wins).
-        let mut incoming_map = std::collections::BTreeMap::new();
-        for entry in entries {
-            incoming_map.insert(entry.key, entry.value);
-        }
-        let incoming: Vec<KvEntry> = incoming_map
-            .into_iter()
-            .map(|(key, value)| KvEntry { key, value })
-            .collect();
-
-        let requested = self.slab.len() + incoming.len() as u32;
+        let len = entries.len() as u32;
+        let padded_len = len.next_power_of_two();
+        let requested = self.slab.len() + len;
         if requested > self.slab.capacity() {
             return Err(GpuMapError::CapacityExceeded {
                 capacity: self.slab.capacity(),
                 requested,
             });
         }
+        if padded_len > self.slab.capacity() {
+            return Err(GpuMapError::CapacityExceeded {
+                capacity: self.slab.capacity(),
+                requested: self.slab.len() + padded_len,
+            });
+        }
 
-        self.input.write(&self.queue, &incoming);
+        self.input.write(&self.queue, entries);
+        if padded_len > len {
+            let pad_count = (padded_len - len) as usize;
+            let padding = vec![
+                KvEntry {
+                    key: u32::MAX,
+                    value: 0,
+                };
+                pad_count
+            ];
+            let offset = (len as u64) * std::mem::size_of::<KvEntry>() as u64;
+            self.queue.write_buffer(
+                self.input.buffer(),
+                offset,
+                bytemuck::cast_slice(&padding),
+            );
+        }
+
+        if len > 1 {
+            let sort_params_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("bulk-sort-params"),
+                size: std::mem::size_of::<SortParams>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let sort_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("bulk-sort-bind-group"),
+                layout: &self.bulk_sort_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: BULK_SORT_BIND_INPUT,
+                        resource: self.input.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: BULK_SORT_BIND_PARAMS,
+                        resource: sort_params_buffer.as_entire_binding(),
+                    },
+                ],
+            });
+
+            let workgroups = ((padded_len + 63) / 64) as u32;
+            let mut k = 2u32;
+            let max_k = padded_len;
+            while k <= max_k {
+                let mut j = k / 2;
+                while j > 0 {
+                    let params = SortParams {
+                        k,
+                        j,
+                        len: padded_len,
+                        _pad: 0,
+                    };
+                    self.queue
+                        .write_buffer(&sort_params_buffer, 0, bytemuck::bytes_of(&params));
+                    let mut encoder =
+                        self.device
+                            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("bulk-sort-encoder"),
+                            });
+                    {
+                        let mut cpass = encoder.begin_compute_pass(
+                            &wgpu::ComputePassDescriptor {
+                                label: Some("bulk-sort-pass"),
+                                timestamp_writes: None,
+                            },
+                        );
+                        cpass.set_pipeline(&self.bulk_sort_pipeline);
+                        cpass.set_bind_group(0, &sort_bind_group, &[]);
+                        cpass.dispatch_workgroups(workgroups, 1, 1);
+                    }
+                    self.queue.submit(Some(encoder.finish()));
+                    j /= 2;
+                }
+                k *= 2;
+            }
+        }
+
+        let dedup_params = DedupParams { len, _pad: [0; 3] };
+        let dedup_params_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bulk-dedup-params"),
+            size: std::mem::size_of::<DedupParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: true,
+        });
+        {
+            let mut view = dedup_params_buffer.slice(..).get_mapped_range_mut();
+            view.copy_from_slice(bytemuck::bytes_of(&dedup_params));
+        }
+        dedup_params_buffer.unmap();
+        let dedup_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bulk-dedup-bind-group"),
+            layout: &self.bulk_dedup_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: BULK_DEDUP_BIND_INPUT,
+                    resource: self.input.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: BULK_DEDUP_BIND_PARAMS,
+                    resource: dedup_params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: BULK_DEDUP_BIND_META,
+                    resource: self.merge_meta.buffer().as_entire_binding(),
+                },
+            ],
+        });
+        let dedup_readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bulk-dedup-readback"),
+            size: std::mem::size_of::<MergeMeta>() as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut dedup_encoder =
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("bulk-dedup-encoder"),
+                });
+        {
+            let mut cpass = dedup_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("bulk-dedup-pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.bulk_dedup_pipeline);
+            cpass.set_bind_group(0, &dedup_bind_group, &[]);
+            cpass.dispatch_workgroups(1, 1, 1);
+        }
+        dedup_encoder.copy_buffer_to_buffer(
+            self.merge_meta.buffer(),
+            0,
+            &dedup_readback,
+            0,
+            std::mem::size_of::<MergeMeta>() as u64,
+        );
+        self.queue.submit(Some(dedup_encoder.finish()));
+        let dedup_meta = readback_vec::<MergeMeta>(&self.device, &dedup_readback);
+        let dedup_len = dedup_meta.first().map(|m| m.len).unwrap_or(0);
+
         let input_meta = InputMeta {
-            len: incoming.len() as u32,
+            len: dedup_len,
             _pad: [0; 3],
         };
         let input_meta_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -983,6 +1247,110 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (lo < slab_meta.len && slab[lo].key == key) {
         slab[lo].value = 0xffffffffu;
     }
+}
+"#;
+
+const BULK_SORT_WGSL: &str = r#"
+struct KvEntry {
+    key: u32,
+    value: u32,
+};
+
+struct SortParams {
+    k: u32,
+    j: u32,
+    len: u32,
+    _pad: u32,
+};
+
+@group(0) @binding(0) var<storage, read_write> data: array<KvEntry>;
+@group(0) @binding(1) var<uniform> params: SortParams;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if (i >= params.len) {
+        return;
+    }
+
+    let ixj = i ^ params.j;
+    if (ixj > i && ixj < params.len) {
+        let a = data[i];
+        let b = data[ixj];
+        let ascending = (i & params.k) == 0u;
+        if (ascending) {
+            if (a.key > b.key) {
+                data[i] = b;
+                data[ixj] = a;
+            }
+        } else {
+            if (a.key < b.key) {
+                data[i] = b;
+                data[ixj] = a;
+            }
+        }
+    }
+}
+"#;
+
+const BULK_DEDUP_WGSL: &str = r#"
+struct KvEntry {
+    key: u32,
+    value: u32,
+};
+
+struct DedupParams {
+    len: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+};
+
+struct MergeMeta {
+    len: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+};
+
+@group(0) @binding(0) var<storage, read_write> data: array<KvEntry>;
+@group(0) @binding(1) var<uniform> params: DedupParams;
+@group(0) @binding(2) var<storage, read_write> dedup_meta: MergeMeta;
+
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x > 0u) {
+        return;
+    }
+
+    let len = params.len;
+    if (len == 0u) {
+        dedup_meta.len = 0u;
+        return;
+    }
+
+    var write_idx: u32 = 0u;
+    var prev_key: u32 = 0u;
+    var i: u32 = 0u;
+    while (i < len) {
+        let entry = data[i];
+        if (write_idx == 0u) {
+            data[write_idx] = entry;
+            prev_key = entry.key;
+            write_idx = 1u;
+        } else {
+            if (entry.key == prev_key) {
+                data[write_idx - 1u] = entry;
+            } else {
+                data[write_idx] = entry;
+                prev_key = entry.key;
+                write_idx = write_idx + 1u;
+            }
+        }
+        i = i + 1u;
+    }
+
+    dedup_meta.len = write_idx;
 }
 "#;
 
