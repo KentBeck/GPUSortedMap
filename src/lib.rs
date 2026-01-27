@@ -163,15 +163,24 @@ pub struct GpuSortedMap {
     merge_meta: GpuStorage<MergeMeta>,
     bulk_get_pipeline: wgpu::ComputePipeline,
     bulk_get_bind_group_layout: wgpu::BindGroupLayout,
+    bulk_delete_pipeline: wgpu::ComputePipeline,
+    bulk_delete_bind_group_layout: wgpu::BindGroupLayout,
     bulk_merge_pipeline: wgpu::ComputePipeline,
     bulk_merge_bind_group_layout: wgpu::BindGroupLayout,
 }
+
+const TOMBSTONE_VALUE: u32 = 0xFFFF_FFFF;
 
 const BULK_GET_BIND_SLAB: u32 = 0;
 const BULK_GET_BIND_SLAB_META: u32 = 1;
 const BULK_GET_BIND_KEYS: u32 = 2;
 const BULK_GET_BIND_KEYS_META: u32 = 3;
 const BULK_GET_BIND_RESULTS: u32 = 4;
+
+const BULK_DELETE_BIND_SLAB: u32 = 0;
+const BULK_DELETE_BIND_SLAB_META: u32 = 1;
+const BULK_DELETE_BIND_KEYS: u32 = 2;
+const BULK_DELETE_BIND_KEYS_META: u32 = 3;
 
 const BULK_MERGE_BIND_SLAB: u32 = 0;
 const BULK_MERGE_BIND_INPUT: u32 = 1;
@@ -311,6 +320,71 @@ impl GpuSortedMap {
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         });
 
+        let bulk_delete_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("bulk-delete-shader"),
+            source: wgpu::ShaderSource::Wgsl(BULK_DELETE_WGSL.into()),
+        });
+        let bulk_delete_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bulk-delete-bind-group-layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: BULK_DELETE_BIND_SLAB,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: BULK_DELETE_BIND_SLAB_META,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: BULK_DELETE_BIND_KEYS,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: BULK_DELETE_BIND_KEYS_META,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+        let bulk_delete_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("bulk-delete-pipeline-layout"),
+                bind_group_layouts: &[&bulk_delete_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+        let bulk_delete_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("bulk-delete-pipeline"),
+                layout: Some(&bulk_delete_pipeline_layout),
+                module: &bulk_delete_shader,
+                entry_point: "main",
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            });
+
         let bulk_merge_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("bulk-merge-shader"),
             source: wgpu::ShaderSource::Wgsl(BULK_MERGE_WGSL.into()),
@@ -405,6 +479,8 @@ impl GpuSortedMap {
             merge_meta,
             bulk_get_pipeline,
             bulk_get_bind_group_layout,
+            bulk_delete_pipeline,
+            bulk_delete_bind_group_layout,
             bulk_merge_pipeline,
             bulk_merge_bind_group_layout,
         })
@@ -425,6 +501,12 @@ impl GpuSortedMap {
     pub fn bulk_put(&mut self, entries: &[KvEntry]) -> Result<(), GpuMapError> {
         if entries.is_empty() {
             return Ok(());
+        }
+
+        if entries.iter().any(|entry| entry.value == TOMBSTONE_VALUE) {
+            return Err(GpuMapError::TombstoneValueReserved {
+                value: TOMBSTONE_VALUE,
+            });
         }
 
         // TODO: Decide whether bulk_put should accept duplicate keys (e.g., last-write-wins).
@@ -630,8 +712,86 @@ impl GpuSortedMap {
         let result_entries = readback_results(&self.device, &readback_buffer);
         result_entries
             .iter()
-            .map(|entry| if entry.found == 0 { None } else { Some(entry.value) })
+            .map(|entry| {
+                if entry.found == 0 || entry.value == TOMBSTONE_VALUE {
+                    None
+                } else {
+                    Some(entry.value)
+                }
+            })
             .collect()
+    }
+
+    pub fn bulk_delete(&self, keys: &[u32]) {
+        if keys.is_empty() {
+            return;
+        }
+
+        let keys_buffer = create_buffer_with_data(
+            &self.device,
+            "delete-keys-buffer",
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            keys,
+        );
+        let keys_meta = KeysMeta {
+            len: keys.len() as u32,
+            _pad: [0; 3],
+        };
+        let keys_meta_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("delete-keys-meta-buffer"),
+            size: std::mem::size_of::<KeysMeta>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: true,
+        });
+        {
+            let mut view = keys_meta_buffer.slice(..).get_mapped_range_mut();
+            view.copy_from_slice(bytemuck::bytes_of(&keys_meta));
+        }
+        keys_meta_buffer.unmap();
+
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bulk-delete-bind-group"),
+            layout: &self.bulk_delete_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: BULK_DELETE_BIND_SLAB,
+                    resource: self.slab.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: BULK_DELETE_BIND_SLAB_META,
+                    resource: self.slab.meta_buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: BULK_DELETE_BIND_KEYS,
+                    resource: keys_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: BULK_DELETE_BIND_KEYS_META,
+                    resource: keys_meta_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder =
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("bulk-delete-encoder"),
+                });
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("bulk-delete-pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.bulk_delete_pipeline);
+            cpass.set_bind_group(0, &bind_group, &[]);
+            let workgroups = ((keys.len() as u32) + 63) / 64;
+            cpass.dispatch_workgroups(workgroups, 1, 1);
+        }
+        self.queue.submit(Some(encoder.finish()));
+    }
+
+    pub fn delete(&self, key: u32) {
+        self.bulk_delete(std::slice::from_ref(&key));
     }
 
     pub fn put(&mut self, key: u32, value: u32) -> Result<(), GpuMapError> {
@@ -647,6 +807,7 @@ impl GpuSortedMap {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpuMapError {
     CapacityExceeded { capacity: u32, requested: u32 },
+    TombstoneValueReserved { value: u32 },
 }
 
 const BULK_GET_WGSL: &str = r#"
@@ -708,6 +869,57 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     } else {
         results[idx].value = 0u;
         results[idx].found = 0u;
+    }
+}
+"#;
+
+const BULK_DELETE_WGSL: &str = r#"
+struct KvEntry {
+    key: u32,
+    value: u32,
+};
+
+struct SlabMeta {
+    len: u32,
+    capacity: u32,
+    _pad0: u32,
+    _pad1: u32,
+};
+
+struct KeysMeta {
+    len: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+};
+
+@group(0) @binding(0) var<storage, read_write> slab: array<KvEntry>;
+@group(0) @binding(1) var<uniform> slab_meta: SlabMeta;
+@group(0) @binding(2) var<storage, read> keys: array<u32>;
+@group(0) @binding(3) var<uniform> keys_meta: KeysMeta;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if (idx >= keys_meta.len) {
+        return;
+    }
+
+    let key = keys[idx];
+    var lo: u32 = 0u;
+    var hi: u32 = slab_meta.len;
+    while (lo < hi) {
+        let mid = (lo + hi) / 2u;
+        let mid_key = slab[mid].key;
+        if (mid_key < key) {
+            lo = mid + 1u;
+        } else {
+            hi = mid;
+        }
+    }
+
+    if (lo < slab_meta.len && slab[lo].key == key) {
+        slab[lo].value = 0xffffffffu;
     }
 }
 "#;
@@ -924,5 +1136,34 @@ mod tests {
     fn single_get_missing_key() {
         let map = pollster::block_on(GpuSortedMap::new(4)).unwrap();
         assert_eq!(map.get(9), None);
+    }
+
+    #[test]
+    fn bulk_delete_clears_values() {
+        let mut map = pollster::block_on(GpuSortedMap::new(8)).unwrap();
+        let entries = [
+            KvEntry { key: 1, value: 10 },
+            KvEntry { key: 2, value: 20 },
+            KvEntry { key: 3, value: 30 },
+        ];
+        map.bulk_put(&entries).unwrap();
+        map.bulk_delete(&[1, 3]);
+        let results = map.bulk_get(&[1, 2, 3]);
+        assert_eq!(results, vec![None, Some(20), None]);
+    }
+
+    #[test]
+    fn delete_single_key() {
+        let mut map = pollster::block_on(GpuSortedMap::new(4)).unwrap();
+        map.put(9, 99).unwrap();
+        map.delete(9);
+        assert_eq!(map.get(9), None);
+    }
+
+    #[test]
+    fn put_rejects_tombstone_value() {
+        let mut map = pollster::block_on(GpuSortedMap::new(4)).unwrap();
+        let err = map.put(1, 0xFFFF_FFFF).unwrap_err();
+        assert!(matches!(err, super::GpuMapError::TombstoneValueReserved { .. }));
     }
 }
