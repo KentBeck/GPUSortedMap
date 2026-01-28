@@ -4,7 +4,7 @@ use crate::gpu_array::{GpuArray, GpuStorage};
 use crate::pipelines::core::ComputeStep;
 use crate::pipelines::data::{DedupParams, InputMeta, MergeMeta, SortParams};
 use crate::pipelines::utils::{create_buffer_with_data, readback_single};
-use crate::KvEntry;
+use crate::{Key, KvEntry, Length, Value};
 
 const BULK_SORT_BIND_INPUT: u32 = 0;
 const BULK_SORT_BIND_PARAMS: u32 = 1;
@@ -183,10 +183,10 @@ impl BulkPutPipeline {
     ) -> Result<u32, crate::GpuMapError> {
         let len = entries_len;
         let padded_len = len.next_power_of_two();
-        if padded_len > slab.capacity() {
+        if padded_len > slab.capacity().0 {
             return Err(crate::GpuMapError::CapacityExceeded {
                 capacity: slab.capacity(),
-                requested: slab.len() + padded_len,
+                requested: Length::new(slab.len().0 + padded_len),
             });
         }
 
@@ -194,8 +194,8 @@ impl BulkPutPipeline {
             let pad_count = (padded_len - len) as usize;
             let padding = vec![
                 KvEntry {
-                    key: u32::MAX,
-                    value: 0,
+                    key: Key::new(u32::MAX),
+                    value: Value::new(0),
                 };
                 pad_count
             ];
@@ -399,7 +399,7 @@ impl BulkPutPipeline {
             (1, 1, 1),
         );
 
-        let slab_bytes = (slab.capacity() as u64) * std::mem::size_of::<KvEntry>() as u64;
+        let slab_bytes = (slab.capacity().0 as u64) * std::mem::size_of::<KvEntry>() as u64;
         encoder.copy_buffer_to_buffer(merge.buffer(), 0, slab.buffer(), 0, slab_bytes);
         encoder.copy_buffer_to_buffer(
             merge_meta.buffer(),

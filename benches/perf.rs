@@ -1,4 +1,4 @@
-use gpusorted_map::{GpuSortedMap, KvEntry};
+use gpusorted_map::{Capacity, GpuSortedMap, Key, KvEntry, Value};
 use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
 use std::collections::BTreeMap;
@@ -13,16 +13,17 @@ fn main() {
 
     let mut rows = Vec::new();
     for size in sizes {
-        let keys: Vec<u32> = (0..size).map(|_| rng.next_u32()).collect();
-        let entries: Vec<KvEntry> = keys
+        let keys_raw: Vec<u32> = (0..size).map(|_| rng.next_u32()).collect();
+        let keys: Vec<Key> = keys_raw.iter().copied().map(Key::new).collect();
+        let entries: Vec<KvEntry> = keys_raw
             .iter()
             .map(|&key| KvEntry {
-                key,
-                value: key.wrapping_mul(31),
+                key: Key::new(key),
+                value: Value::new(key.wrapping_mul(31)),
             })
             .collect();
 
-        let (btree_put, btree_get) = bench_btree(&keys);
+        let (btree_put, btree_get) = bench_btree(&keys_raw);
         let (gpu_put, gpu_get) = bench_gpu(&entries, &keys);
 
         rows.push((size, btree_put, btree_get, gpu_put, gpu_get));
@@ -77,8 +78,8 @@ fn bench_btree(keys: &[u32]) -> (Duration, Duration) {
     (put, start.elapsed())
 }
 
-fn bench_gpu(entries: &[KvEntry], keys: &[u32]) -> (Duration, Duration) {
-    let mut map = pollster::block_on(GpuSortedMap::new((entries.len() * 2) as u32))
+fn bench_gpu(entries: &[KvEntry], keys: &[Key]) -> (Duration, Duration) {
+    let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new((entries.len() * 2) as u32)))
         .expect("failed to init GPU map");
 
     let start = Instant::now();

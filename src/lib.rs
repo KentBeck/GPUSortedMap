@@ -3,15 +3,15 @@
 //! # Quick start
 //!
 //! ```rust
-//! use gpusorted_map::{GpuSortedMap, KvEntry};
+//! use gpusorted_map::{Capacity, GpuSortedMap, Key, KvEntry, Value};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let mut map = pollster::block_on(GpuSortedMap::new(1024))?;
+//! let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(1024)))?;
 //! map.bulk_put(&[
-//!     KvEntry { key: 1, value: 10 },
-//!     KvEntry { key: 2, value: 20 },
+//!     KvEntry { key: Key::new(1), value: Value::new(10) },
+//!     KvEntry { key: Key::new(2), value: Value::new(20) },
 //! ])?;
-//! assert_eq!(map.get(1), Some(10));
+//! assert_eq!(map.get(Key::new(1)), Some(Value::new(10)));
 //! # Ok(())
 //! # }
 //! ```
@@ -27,15 +27,87 @@ use crate::pipelines::{
     BulkDeletePipeline, BulkGetPipeline, BulkPutPipeline, MergeMeta, RangeScanPipeline,
 };
 
-/// Key/value pair stored in the GPU slab.
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable, Debug, Default)]
-pub struct KvEntry {
-    pub key: u32,
-    pub value: u32,
+#[repr(transparent)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Key(pub u32);
+
+impl Key {
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
 }
 
-const TOMBSTONE_VALUE: u32 = 0xFFFF_FFFF;
+impl From<u32> for Key {
+    fn from(value: u32) -> Self {
+        Self(value)
+    }
+}
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug, Default, PartialEq, Eq)]
+pub struct Value(pub u32);
+
+impl Value {
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+}
+
+impl From<u32> for Value {
+    fn from(value: u32) -> Self {
+        Self(value)
+    }
+}
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Capacity(pub u32);
+
+impl Capacity {
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+}
+
+impl From<u32> for Capacity {
+    fn from(value: u32) -> Self {
+        Self(value)
+    }
+}
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Length(pub u32);
+
+impl Length {
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+}
+
+impl From<u32> for Length {
+    fn from(value: u32) -> Self {
+        Self(value)
+    }
+}
+
+/// Key/value pair stored in the GPU slab.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug, Default, PartialEq, Eq)]
+pub struct KvEntry {
+    pub key: Key,
+    pub value: Value,
+}
+
+const TOMBSTONE_VALUE: Value = Value(0xFFFF_FFFF);
 
 /// GPU-backed sorted map with batched operations.
 pub struct GpuSortedMap {
@@ -52,7 +124,7 @@ pub struct GpuSortedMap {
 
 impl GpuSortedMap {
     /// Create a new map with the given slab capacity.
-    pub async fn new(capacity: u32) -> Result<Self, wgpu::RequestDeviceError> {
+    pub async fn new(capacity: Capacity) -> Result<Self, wgpu::RequestDeviceError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
@@ -139,7 +211,7 @@ impl GpuSortedMap {
     }
 
     /// Batch lookup of keys.
-    pub fn bulk_get(&self, keys: &[u32]) -> Vec<Option<u32>> {
+    pub fn bulk_get(&self, keys: &[Key]) -> Vec<Option<Value>> {
         self.bulk_get.execute(&self.slab, keys)
     }
 
@@ -155,9 +227,9 @@ impl GpuSortedMap {
             });
         }
 
-        let len = entries.len() as u32;
-        let requested = self.slab.len() + len;
-        if requested > self.slab.capacity() {
+        let len = Length::new(entries.len() as u32);
+        let requested = Length::new(self.slab.len().0 + len.0);
+        if requested.0 > self.slab.capacity().0 {
             return Err(GpuMapError::CapacityExceeded {
                 capacity: self.slab.capacity(),
                 requested,
@@ -165,36 +237,40 @@ impl GpuSortedMap {
         }
 
         self.input.write(&self.queue, entries);
-        let merge_len =
-            self.bulk_put
-                .execute(&self.slab, &self.input, &self.merge, &self.merge_meta, len)?;
-        self.update_len(merge_len);
+        let merge_len = self.bulk_put.execute(
+            &self.slab,
+            &self.input,
+            &self.merge,
+            &self.merge_meta,
+            len.0,
+        )?;
+        self.update_len(Length::new(merge_len));
         Ok(())
     }
 
     /// Batch delete of keys.
-    pub fn bulk_delete(&mut self, keys: &[u32]) {
+    pub fn bulk_delete(&mut self, keys: &[Key]) {
         self.bulk_delete.execute(&self.slab, keys);
     }
 
     /// Single-key lookup convenience wrapper over `bulk_get`.
-    pub fn get(&self, key: u32) -> Option<u32> {
+    pub fn get(&self, key: Key) -> Option<Value> {
         self.bulk_get(&[key]).into_iter().next().unwrap_or(None)
     }
 
     /// Single-key insert/update convenience wrapper over `bulk_put`.
-    pub fn put(&mut self, key: u32, value: u32) -> Result<(), GpuMapError> {
+    pub fn put(&mut self, key: Key, value: Value) -> Result<(), GpuMapError> {
         let entry = KvEntry { key, value };
         self.bulk_put(std::slice::from_ref(&entry))
     }
 
     /// Single-key delete convenience wrapper over `bulk_delete`.
-    pub fn delete(&mut self, key: u32) {
+    pub fn delete(&mut self, key: Key) {
         self.bulk_delete(std::slice::from_ref(&key));
     }
 
     /// Returns entries with keys in `[from_key, to_key)`.
-    pub fn range(&self, from_key: u32, to_key: u32) -> Vec<KvEntry> {
+    pub fn range(&self, from_key: Key, to_key: Key) -> Vec<KvEntry> {
         self.range_scan
             .execute(&self.slab, from_key, to_key)
             .into_iter()
@@ -203,28 +279,28 @@ impl GpuSortedMap {
     }
 
     /// Iterator over entries with keys in `[from_key, to_key)`.
-    pub fn range_iter(&self, from_key: u32, to_key: u32) -> std::vec::IntoIter<KvEntry> {
+    pub fn range_iter(&self, from_key: Key, to_key: Key) -> std::vec::IntoIter<KvEntry> {
         self.range(from_key, to_key).into_iter()
     }
 
     /// Total slab capacity.
-    pub fn capacity(&self) -> u32 {
+    pub fn capacity(&self) -> Capacity {
         self.slab.capacity()
     }
 
     /// Current number of stored entries.
-    pub fn len(&self) -> u32 {
+    pub fn len(&self) -> Length {
         self.slab.len()
     }
 
     #[must_use]
     /// Returns true if the map is empty.
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.len().0 == 0
     }
 
     /// Update the stored length metadata.
-    pub fn update_len(&mut self, new_len: u32) {
+    pub fn update_len(&mut self, new_len: Length) {
         self.slab.update_len(&self.queue, new_len);
     }
 }
@@ -232,8 +308,13 @@ impl GpuSortedMap {
 /// Errors returned by `GpuSortedMap` operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpuMapError {
-    CapacityExceeded { capacity: u32, requested: u32 },
-    TombstoneValueReserved { value: u32 },
+    CapacityExceeded {
+        capacity: Capacity,
+        requested: Length,
+    },
+    TombstoneValueReserved {
+        value: Value,
+    },
 }
 
 impl std::fmt::Display for GpuMapError {
@@ -246,14 +327,14 @@ impl std::fmt::Display for GpuMapError {
                 write!(
                     f,
                     "Capacity exceeded: requested {} entries but capacity is {}",
-                    requested, capacity
+                    requested.0, capacity.0
                 )
             }
             GpuMapError::TombstoneValueReserved { value } => {
                 write!(
                     f,
                     "Value 0x{:08X} is reserved as tombstone marker and cannot be used",
-                    value
+                    value.0
                 )
             }
         }
@@ -264,172 +345,246 @@ impl std::error::Error for GpuMapError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{GpuSortedMap, KvEntry};
+    use super::{Capacity, GpuSortedMap, Key, KvEntry, Length, Value};
+
+    fn k(value: u32) -> Key {
+        Key::new(value)
+    }
+
+    fn v(value: u32) -> Value {
+        Value::new(value)
+    }
 
     #[test]
     fn creates_gpu_sorted_map() {
-        let map = pollster::block_on(GpuSortedMap::new(1024));
+        let map = pollster::block_on(GpuSortedMap::new(Capacity::new(1024)));
         assert!(map.is_ok(), "GpuSortedMap::new should succeed");
     }
 
     #[test]
     fn put_then_get() {
-        let mut map = pollster::block_on(GpuSortedMap::new(8)).unwrap();
+        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(8))).unwrap();
         let entries = [
-            KvEntry { key: 42, value: 7 },
-            KvEntry { key: 7, value: 9 },
-            KvEntry { key: 13, value: 1 },
+            KvEntry {
+                key: k(42),
+                value: v(7),
+            },
+            KvEntry {
+                key: k(7),
+                value: v(9),
+            },
+            KvEntry {
+                key: k(13),
+                value: v(1),
+            },
         ];
         map.bulk_put(&entries).unwrap();
 
-        let results = map.bulk_get(&[7, 13, 42, 99]);
-        assert_eq!(results, vec![Some(9), Some(1), Some(7), None]);
+        let results = map.bulk_get(&[k(7), k(13), k(42), k(99)]);
+        assert_eq!(results, vec![Some(v(9)), Some(v(1)), Some(v(7)), None]);
     }
 
     #[test]
     fn single_put_then_get() {
-        let mut map = pollster::block_on(GpuSortedMap::new(4)).unwrap();
-        map.put(5, 11).unwrap();
-        assert_eq!(map.get(5), Some(11));
+        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(4))).unwrap();
+        map.put(k(5), v(11)).unwrap();
+        assert_eq!(map.get(k(5)), Some(v(11)));
     }
 
     #[test]
     fn single_get_missing_key() {
-        let map = pollster::block_on(GpuSortedMap::new(4)).unwrap();
-        assert_eq!(map.get(9), None);
+        let map = pollster::block_on(GpuSortedMap::new(Capacity::new(4))).unwrap();
+        assert_eq!(map.get(k(9)), None);
     }
 
     #[test]
     fn bulk_delete_clears_values() {
-        let mut map = pollster::block_on(GpuSortedMap::new(8)).unwrap();
+        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(8))).unwrap();
         let entries = [
-            KvEntry { key: 1, value: 10 },
-            KvEntry { key: 2, value: 20 },
-            KvEntry { key: 3, value: 30 },
+            KvEntry {
+                key: k(1),
+                value: v(10),
+            },
+            KvEntry {
+                key: k(2),
+                value: v(20),
+            },
+            KvEntry {
+                key: k(3),
+                value: v(30),
+            },
         ];
         map.bulk_put(&entries).unwrap();
-        map.bulk_delete(&[1, 3]);
-        let results = map.bulk_get(&[1, 2, 3]);
-        assert_eq!(results, vec![None, Some(20), None]);
+        map.bulk_delete(&[k(1), k(3)]);
+        let results = map.bulk_get(&[k(1), k(2), k(3)]);
+        assert_eq!(results, vec![None, Some(v(20)), None]);
     }
 
     #[test]
     fn delete_single_key() {
-        let mut map = pollster::block_on(GpuSortedMap::new(4)).unwrap();
-        map.put(9, 99).unwrap();
-        map.delete(9);
-        assert_eq!(map.get(9), None);
+        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(4))).unwrap();
+        map.put(k(9), v(99)).unwrap();
+        map.delete(k(9));
+        assert_eq!(map.get(k(9)), None);
     }
 
     #[test]
     fn range_returns_half_open_interval() {
-        let mut map = pollster::block_on(GpuSortedMap::new(16)).unwrap();
+        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(16))).unwrap();
         map.bulk_put(&[
-            KvEntry { key: 1, value: 10 },
-            KvEntry { key: 2, value: 20 },
-            KvEntry { key: 3, value: 30 },
-            KvEntry { key: 4, value: 40 },
+            KvEntry {
+                key: k(1),
+                value: v(10),
+            },
+            KvEntry {
+                key: k(2),
+                value: v(20),
+            },
+            KvEntry {
+                key: k(3),
+                value: v(30),
+            },
+            KvEntry {
+                key: k(4),
+                value: v(40),
+            },
         ])
         .unwrap();
 
-        let entries = map.range(2, 4);
-        let keys: Vec<u32> = entries.iter().map(|entry| entry.key).collect();
-        assert_eq!(keys, vec![2, 3]);
+        let entries = map.range(k(2), k(4));
+        let keys: Vec<Key> = entries.iter().map(|entry| entry.key).collect();
+        assert_eq!(keys, vec![k(2), k(3)]);
     }
 
     #[test]
     fn range_empty_when_from_equals_to() {
-        let mut map = pollster::block_on(GpuSortedMap::new(16)).unwrap();
-        map.bulk_put(&[KvEntry { key: 1, value: 10 }, KvEntry { key: 2, value: 20 }])
-            .unwrap();
-        assert!(map.range(2, 2).is_empty());
+        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(16))).unwrap();
+        map.bulk_put(&[
+            KvEntry {
+                key: k(1),
+                value: v(10),
+            },
+            KvEntry {
+                key: k(2),
+                value: v(20),
+            },
+        ])
+        .unwrap();
+        assert!(map.range(k(2), k(2)).is_empty());
     }
 
     #[test]
     fn range_empty_when_from_greater_than_to() {
-        let mut map = pollster::block_on(GpuSortedMap::new(16)).unwrap();
-        map.bulk_put(&[KvEntry { key: 1, value: 10 }, KvEntry { key: 2, value: 20 }])
-            .unwrap();
-        assert!(map.range(3, 1).is_empty());
+        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(16))).unwrap();
+        map.bulk_put(&[
+            KvEntry {
+                key: k(1),
+                value: v(10),
+            },
+            KvEntry {
+                key: k(2),
+                value: v(20),
+            },
+        ])
+        .unwrap();
+        assert!(map.range(k(3), k(1)).is_empty());
     }
 
     #[test]
     fn range_empty_on_empty_map() {
-        let map = pollster::block_on(GpuSortedMap::new(16)).unwrap();
-        assert!(map.range(0, 10).is_empty());
+        let map = pollster::block_on(GpuSortedMap::new(Capacity::new(16))).unwrap();
+        assert!(map.range(k(0), k(10)).is_empty());
     }
 
     #[test]
     fn range_outside_bounds_is_empty() {
-        let mut map = pollster::block_on(GpuSortedMap::new(16)).unwrap();
+        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(16))).unwrap();
         map.bulk_put(&[
-            KvEntry { key: 10, value: 10 },
-            KvEntry { key: 20, value: 20 },
+            KvEntry {
+                key: k(10),
+                value: v(10),
+            },
+            KvEntry {
+                key: k(20),
+                value: v(20),
+            },
         ])
         .unwrap();
-        assert!(map.range(0, 5).is_empty());
-        assert!(map.range(30, 40).is_empty());
+        assert!(map.range(k(0), k(5)).is_empty());
+        assert!(map.range(k(30), k(40)).is_empty());
     }
 
     #[test]
     fn range_clamps_to_existing_keys() {
-        let mut map = pollster::block_on(GpuSortedMap::new(16)).unwrap();
+        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(16))).unwrap();
         map.bulk_put(&[
-            KvEntry { key: 5, value: 50 },
             KvEntry {
-                key: 10,
-                value: 100,
+                key: k(5),
+                value: v(50),
             },
             KvEntry {
-                key: 15,
-                value: 150,
+                key: k(10),
+                value: v(100),
+            },
+            KvEntry {
+                key: k(15),
+                value: v(150),
             },
         ])
         .unwrap();
-        let keys: Vec<u32> = map.range(0, 100).iter().map(|e| e.key).collect();
-        assert_eq!(keys, vec![5, 10, 15]);
+        let keys: Vec<Key> = map.range(k(0), k(100)).iter().map(|e| e.key).collect();
+        assert_eq!(keys, vec![k(5), k(10), k(15)]);
     }
 
     #[test]
     fn range_starts_between_keys() {
-        let mut map = pollster::block_on(GpuSortedMap::new(16)).unwrap();
+        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(16))).unwrap();
         map.bulk_put(&[
             KvEntry {
-                key: 10,
-                value: 100,
+                key: k(10),
+                value: v(100),
             },
             KvEntry {
-                key: 20,
-                value: 200,
+                key: k(20),
+                value: v(200),
             },
             KvEntry {
-                key: 30,
-                value: 300,
+                key: k(30),
+                value: v(300),
             },
         ])
         .unwrap();
-        let keys: Vec<u32> = map.range(15, 30).iter().map(|e| e.key).collect();
-        assert_eq!(keys, vec![20]);
+        let keys: Vec<Key> = map.range(k(15), k(30)).iter().map(|e| e.key).collect();
+        assert_eq!(keys, vec![k(20)]);
     }
 
     #[test]
     fn range_excludes_tombstones() {
-        let mut map = pollster::block_on(GpuSortedMap::new(16)).unwrap();
+        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(16))).unwrap();
         map.bulk_put(&[
-            KvEntry { key: 1, value: 10 },
-            KvEntry { key: 2, value: 20 },
-            KvEntry { key: 3, value: 30 },
+            KvEntry {
+                key: k(1),
+                value: v(10),
+            },
+            KvEntry {
+                key: k(2),
+                value: v(20),
+            },
+            KvEntry {
+                key: k(3),
+                value: v(30),
+            },
         ])
         .unwrap();
-        map.delete(2);
-        let keys: Vec<u32> = map.range(1, 4).iter().map(|e| e.key).collect();
-        assert_eq!(keys, vec![1, 3]);
+        map.delete(k(2));
+        let keys: Vec<Key> = map.range(k(1), k(4)).iter().map(|e| e.key).collect();
+        assert_eq!(keys, vec![k(1), k(3)]);
     }
 
     #[test]
     fn put_rejects_tombstone_value() {
-        let mut map = pollster::block_on(GpuSortedMap::new(4)).unwrap();
-        let err = map.put(1, 0xFFFF_FFFF).unwrap_err();
+        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(4))).unwrap();
+        let err = map.put(k(1), v(0xFFFF_FFFF)).unwrap_err();
         assert!(matches!(
             err,
             super::GpuMapError::TombstoneValueReserved { .. }
@@ -438,17 +593,17 @@ mod tests {
 
     #[test]
     fn bulk_get_empty_keys() {
-        let map = pollster::block_on(GpuSortedMap::new(10)).unwrap();
+        let map = pollster::block_on(GpuSortedMap::new(Capacity::new(10))).unwrap();
         let results = map.bulk_get(&[]);
         assert!(results.is_empty());
     }
 
     #[test]
     fn bulk_delete_empty_keys() {
-        let mut map = pollster::block_on(GpuSortedMap::new(10)).unwrap();
-        map.put(1, 10).unwrap();
+        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(10))).unwrap();
+        map.put(k(1), v(10)).unwrap();
         map.bulk_delete(&[]);
-        assert_eq!(map.get(1), Some(10));
+        assert_eq!(map.get(k(1)), Some(v(10)));
     }
 
     #[test]
@@ -459,8 +614,14 @@ mod tests {
         // If I use capacity 6 and entries 5.
         // High-level: 5 <= 6. OK.
         // Internal: next_power_of_two(5) = 8. 8 > 6. FAIL.
-        let mut map = pollster::block_on(GpuSortedMap::new(6)).unwrap();
-        let entries = vec![KvEntry { key: 1, value: 1 }; 5];
+        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(6))).unwrap();
+        let entries = vec![
+            KvEntry {
+                key: k(1),
+                value: v(1)
+            };
+            5
+        ];
         let res = map.bulk_put(&entries);
         assert!(matches!(
             res,
@@ -470,16 +631,16 @@ mod tests {
 
     #[test]
     fn is_empty_returns_true_for_new_map() {
-        let map = pollster::block_on(GpuSortedMap::new(10)).unwrap();
+        let map = pollster::block_on(GpuSortedMap::new(Capacity::new(10))).unwrap();
         assert!(map.is_empty());
-        assert_eq!(map.len(), 0);
+        assert_eq!(map.len(), Length::new(0));
     }
 
     #[test]
     fn is_empty_returns_false_after_insert() {
-        let mut map = pollster::block_on(GpuSortedMap::new(10)).unwrap();
-        map.put(1, 10).unwrap();
+        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(10))).unwrap();
+        map.put(k(1), v(10)).unwrap();
         assert!(!map.is_empty());
-        assert_eq!(map.len(), 1);
+        assert_eq!(map.len(), Length::new(1));
     }
 }

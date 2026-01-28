@@ -5,7 +5,7 @@ use bytemuck::{Pod, Zeroable};
 use crate::gpu_array::GpuArray;
 use crate::pipelines::core::ComputeStep;
 use crate::pipelines::utils::{create_buffer_with_data, readback_single, readback_vec};
-use crate::KvEntry;
+use crate::{Key, KvEntry};
 
 const RANGE_BIND_SLAB: u32 = 0;
 const RANGE_BIND_SLAB_META: u32 = 1;
@@ -91,14 +91,14 @@ impl RangeScanPipeline {
         }
     }
 
-    pub fn execute(&self, slab: &GpuArray<KvEntry>, from_key: u32, to_key: u32) -> Vec<KvEntry> {
-        if from_key >= to_key || slab.len() == 0 {
+    pub fn execute(&self, slab: &GpuArray<KvEntry>, from_key: Key, to_key: Key) -> Vec<KvEntry> {
+        if from_key >= to_key || slab.len().0 == 0 {
             return Vec::new();
         }
 
         let params = RangeParams {
-            from_key,
-            to_key,
+            from_key: from_key.0,
+            to_key: to_key.0,
             _pad: [0; 2],
         };
         let params_buffer = create_buffer_with_data(

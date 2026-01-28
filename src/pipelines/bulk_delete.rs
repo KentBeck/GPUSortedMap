@@ -4,7 +4,7 @@ use crate::gpu_array::GpuArray;
 use crate::pipelines::core::ComputeStep;
 use crate::pipelines::data::KeysMeta;
 use crate::pipelines::utils::create_buffer_with_data;
-use crate::KvEntry;
+use crate::{Key, KvEntry};
 
 const BULK_DELETE_BIND_SLAB: u32 = 0;
 const BULK_DELETE_BIND_SLAB_META: u32 = 1;
@@ -73,7 +73,7 @@ impl BulkDeletePipeline {
         }
     }
 
-    pub fn execute(&self, slab: &GpuArray<KvEntry>, keys: &[u32]) {
+    pub fn execute(&self, slab: &GpuArray<KvEntry>, keys: &[Key]) {
         if keys.is_empty() {
             return;
         }

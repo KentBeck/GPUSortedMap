@@ -4,9 +4,9 @@ use crate::gpu_array::GpuArray;
 use crate::pipelines::core::ComputeStep;
 use crate::pipelines::data::{KeysMeta, ResultEntry};
 use crate::pipelines::utils::{create_buffer_with_data, readback_vec};
-use crate::KvEntry;
+use crate::{Key, KvEntry, Value};
 
-const TOMBSTONE_VALUE: u32 = 0xFFFF_FFFF;
+const TOMBSTONE_VALUE: Value = Value(0xFFFF_FFFF);
 const BULK_GET_BIND_SLAB: u32 = 0;
 const BULK_GET_BIND_SLAB_META: u32 = 1;
 const BULK_GET_BIND_KEYS: u32 = 2;
@@ -85,7 +85,7 @@ impl BulkGetPipeline {
         }
     }
 
-    pub fn execute(&self, slab: &GpuArray<KvEntry>, keys: &[u32]) -> Vec<Option<u32>> {
+    pub fn execute(&self, slab: &GpuArray<KvEntry>, keys: &[Key]) -> Vec<Option<Value>> {
         if keys.is_empty() {
             return Vec::new();
         }
@@ -172,10 +172,10 @@ impl BulkGetPipeline {
         result_entries
             .iter()
             .map(|entry| {
-                if entry.found == 0 || entry.value == TOMBSTONE_VALUE {
+                if entry.found == 0 || entry.value == TOMBSTONE_VALUE.0 {
                     None
                 } else {
-                    Some(entry.value)
+                    Some(Value(entry.value))
                 }
             })
             .collect()

@@ -14,19 +14,19 @@ cargo add gpusorted_map
 Minimal example:
 
 ```rust
-use gpusorted_map::{GpuSortedMap, KvEntry};
+use gpusorted_map::{Capacity, GpuSortedMap, Key, KvEntry, Value};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut map = pollster::block_on(GpuSortedMap::new(1024))?;
+    let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(1024)))?;
 
     map.bulk_put(&[
-        KvEntry { key: 1, value: 10 },
-        KvEntry { key: 2, value: 20 },
+        KvEntry { key: Key::new(1), value: Value::new(10) },
+        KvEntry { key: Key::new(2), value: Value::new(20) },
     ])?;
 
-    assert_eq!(map.get(1), Some(10));
-    map.delete(2);
-    assert_eq!(map.get(2), None);
+    assert_eq!(map.get(Key::new(1)), Some(Value::new(10)));
+    map.delete(Key::new(2));
+    assert_eq!(map.get(Key::new(2)), None);
 
     Ok(())
 }
@@ -42,8 +42,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## API overview
 
 - `bulk_put(&[KvEntry]) -> Result<(), GpuMapError>`
-- `bulk_get(&[u32]) -> Vec<Option<u32>>`
-- `bulk_delete(&[u32])`
+- `bulk_get(&[Key]) -> Vec<Option<Value>>`
+- `bulk_delete(&[Key])`
 - `range(from_key, to_key) -> Vec<KvEntry>` (half-open range)
 - Convenience helpers: `put`, `get`, `delete`
 

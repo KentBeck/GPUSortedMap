@@ -2,6 +2,7 @@ use bytemuck::{Pod, Zeroable};
 use std::marker::PhantomData;
 
 use crate::pipelines::utils::create_buffer_with_data;
+use crate::{Capacity, Length};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug, Default)]
@@ -14,19 +15,19 @@ pub struct SlabMeta {
 pub struct GpuArray<T: Pod> {
     buffer: wgpu::Buffer,
     meta_buffer: wgpu::Buffer,
-    capacity: u32,
-    len: u32,
+    capacity: Capacity,
+    len: Length,
     _marker: PhantomData<T>,
 }
 
 impl<T: Pod> GpuArray<T> {
     pub fn new(
         device: &wgpu::Device,
-        capacity: u32,
+        capacity: Capacity,
         buffer_usage: wgpu::BufferUsages,
         label: &str,
     ) -> Self {
-        let size = (capacity as u64) * std::mem::size_of::<T>() as u64;
+        let size = (capacity.0 as u64) * std::mem::size_of::<T>() as u64;
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
             size,
@@ -36,7 +37,7 @@ impl<T: Pod> GpuArray<T> {
 
         let meta = SlabMeta {
             len: 0,
-            capacity,
+            capacity: capacity.0,
             _pad: [0; 2],
         };
         let meta_buffer = create_buffer_with_data(
@@ -52,7 +53,7 @@ impl<T: Pod> GpuArray<T> {
             buffer,
             meta_buffer,
             capacity,
-            len: 0,
+            len: Length(0),
             _marker: PhantomData,
         }
     }
@@ -65,19 +66,19 @@ impl<T: Pod> GpuArray<T> {
         &self.meta_buffer
     }
 
-    pub fn capacity(&self) -> u32 {
+    pub fn capacity(&self) -> Capacity {
         self.capacity
     }
 
-    pub fn len(&self) -> u32 {
+    pub fn len(&self) -> Length {
         self.len
     }
 
-    pub fn update_len(&mut self, queue: &wgpu::Queue, new_len: u32) {
-        self.len = new_len.min(self.capacity);
+    pub fn update_len(&mut self, queue: &wgpu::Queue, new_len: Length) {
+        self.len = Length(new_len.0.min(self.capacity.0));
         let meta = SlabMeta {
-            len: self.len,
-            capacity: self.capacity,
+            len: self.len.0,
+            capacity: self.capacity.0,
             _pad: [0; 2],
         };
         queue.write_buffer(&self.meta_buffer, 0, bytemuck::bytes_of(&meta));
@@ -120,6 +121,7 @@ impl<T: Pod> GpuStorage<T> {
 mod tests {
     use super::{GpuArray, SlabMeta};
     use crate::pipelines::utils::readback_vec;
+    use crate::{Capacity, Length};
 
     async fn create_device_queue() -> (wgpu::Device, wgpu::Queue) {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -184,12 +186,12 @@ mod tests {
         let (device, _queue) = pollster::block_on(create_device_queue());
         let array = GpuArray::<u32>::new(
             &device,
-            4,
+            Capacity::new(4),
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             "test-buffer",
         );
-        assert_eq!(array.capacity(), 4);
-        assert_eq!(array.len(), 0);
+        assert_eq!(array.capacity(), Capacity::new(4));
+        assert_eq!(array.len(), Length::new(0));
     }
 
     #[test]
@@ -197,13 +199,13 @@ mod tests {
         let (device, queue) = pollster::block_on(create_device_queue());
         let mut array = GpuArray::<u32>::new(
             &device,
-            4,
+            Capacity::new(4),
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             "test-buffer",
         );
 
-        array.update_len(&queue, 10);
-        assert_eq!(array.len(), 4);
+        array.update_len(&queue, Length::new(10));
+        assert_eq!(array.len(), Length::new(4));
 
         let meta = readback_gpu_array::<SlabMeta>(
             &device,
@@ -221,7 +223,7 @@ mod tests {
         let (device, queue) = pollster::block_on(create_device_queue());
         let array = GpuArray::<u32>::new(
             &device,
-            4,
+            Capacity::new(4),
             wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
@@ -245,7 +247,7 @@ mod tests {
         let (device, queue) = pollster::block_on(create_device_queue());
         let array = GpuArray::<u32>::new(
             &device,
-            4,
+            Capacity::new(4),
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             "test-buffer",
         );
