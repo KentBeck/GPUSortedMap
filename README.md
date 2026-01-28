@@ -47,6 +47,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 - `range(from_key, to_key) -> Vec<KvEntry>` (half-open range)
 - Convenience helpers: `put`, `get`, `delete`
 
+### Newtype helpers
+
+`Key`, `Value`, `Capacity`, and `Length` are `#[repr(transparent)]` newtypes over `u32`.
+You can use `Key::new(42)` or `Key::from(42)`, and convert back with `u32::from(key)`.
+
 Notes:
 - `0xFFFF_FFFF` is reserved as the tombstone value.
 - `bulk_put` returns `GpuMapError::CapacityExceeded` when the requested size

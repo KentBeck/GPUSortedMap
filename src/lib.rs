@@ -27,6 +27,7 @@ use crate::pipelines::{
     BulkDeletePipeline, BulkGetPipeline, BulkPutPipeline, MergeMeta, RangeScanPipeline,
 };
 
+/// Key wrapper to distinguish keys from other `u32` values.
 #[repr(transparent)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Key(pub u32);
@@ -43,6 +44,13 @@ impl From<u32> for Key {
     }
 }
 
+impl From<Key> for u32 {
+    fn from(value: Key) -> Self {
+        value.0
+    }
+}
+
+/// Value wrapper to distinguish values from other `u32` values.
 #[repr(transparent)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug, Default, PartialEq, Eq)]
 pub struct Value(pub u32);
@@ -59,6 +67,13 @@ impl From<u32> for Value {
     }
 }
 
+impl From<Value> for u32 {
+    fn from(value: Value) -> Self {
+        value.0
+    }
+}
+
+/// Capacity wrapper to distinguish sizes from other `u32` values.
 #[repr(transparent)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Capacity(pub u32);
@@ -79,6 +94,13 @@ impl From<u32> for Capacity {
     }
 }
 
+impl From<Capacity> for u32 {
+    fn from(value: Capacity) -> Self {
+        value.0
+    }
+}
+
+/// Length wrapper to distinguish sizes from other `u32` values.
 #[repr(transparent)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Length(pub u32);
@@ -96,6 +118,12 @@ impl Length {
 impl From<u32> for Length {
     fn from(value: u32) -> Self {
         Self(value)
+    }
+}
+
+impl From<Length> for u32 {
+    fn from(value: Length) -> Self {
+        value.0
     }
 }
 
