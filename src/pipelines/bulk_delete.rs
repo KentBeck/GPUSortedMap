@@ -2,9 +2,14 @@ use std::sync::Arc;
 
 use crate::gpu_array::GpuArray;
 use crate::pipelines::core::ComputeStep;
-use crate::pipelines::data::*;
+use crate::pipelines::data::KeysMeta;
 use crate::pipelines::utils::create_buffer_with_data;
 use crate::KvEntry;
+
+const BULK_DELETE_BIND_SLAB: u32 = 0;
+const BULK_DELETE_BIND_SLAB_META: u32 = 1;
+const BULK_DELETE_BIND_KEYS: u32 = 2;
+const BULK_DELETE_BIND_KEYS_META: u32 = 3;
 
 pub struct BulkDeletePipeline {
     device: Arc<wgpu::Device>,

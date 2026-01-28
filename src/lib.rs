@@ -5,7 +5,7 @@ use bytemuck::{Pod, Zeroable};
 use std::sync::Arc;
 
 use crate::gpu_array::{GpuArray, GpuStorage};
-use crate::pipelines::{BulkDeletePipeline, BulkGetPipeline, BulkPutPipeline, MergeMeta, TOMBSTONE_VALUE};
+use crate::pipelines::{BulkDeletePipeline, BulkGetPipeline, BulkPutPipeline, MergeMeta};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug, Default)]
@@ -13,6 +13,8 @@ pub struct KvEntry {
     pub key: u32,
     pub value: u32,
 }
+
+const TOMBSTONE_VALUE: u32 = 0xFFFF_FFFF;
 
 pub struct GpuSortedMap {
     queue: Arc<wgpu::Queue>,

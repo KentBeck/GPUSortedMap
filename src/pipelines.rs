@@ -8,4 +8,4 @@ pub mod utils;
 pub use bulk_delete::BulkDeletePipeline;
 pub use bulk_get::BulkGetPipeline;
 pub use bulk_put::BulkPutPipeline;
-pub use data::{MergeMeta, TOMBSTONE_VALUE};
+pub use data::MergeMeta;

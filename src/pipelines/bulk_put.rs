@@ -2,9 +2,23 @@ use std::sync::Arc;
 
 use crate::gpu_array::{GpuArray, GpuStorage};
 use crate::pipelines::core::ComputeStep;
-use crate::pipelines::data::*;
+use crate::pipelines::data::{DedupParams, InputMeta, MergeMeta, SortParams};
 use crate::pipelines::utils::{create_buffer_with_data, readback_single};
 use crate::KvEntry;
+
+const BULK_SORT_BIND_INPUT: u32 = 0;
+const BULK_SORT_BIND_PARAMS: u32 = 1;
+
+const BULK_DEDUP_BIND_INPUT: u32 = 0;
+const BULK_DEDUP_BIND_PARAMS: u32 = 1;
+const BULK_DEDUP_BIND_META: u32 = 2;
+
+const BULK_MERGE_BIND_SLAB: u32 = 0;
+const BULK_MERGE_BIND_INPUT: u32 = 1;
+const BULK_MERGE_BIND_OUTPUT: u32 = 2;
+const BULK_MERGE_BIND_SLAB_META: u32 = 3;
+const BULK_MERGE_BIND_INPUT_META: u32 = 4;
+const BULK_MERGE_BIND_MERGE_META: u32 = 5;
 
 pub struct BulkPutPipeline {
     device: Arc<wgpu::Device>,
