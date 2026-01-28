@@ -17,9 +17,6 @@
 *.yml text eol=lf
 *.yaml text eol=lf
 
-# Lock files (binary)
-Cargo.lock binary
-
 # Archives
 *.zip binary
 *.tar binary

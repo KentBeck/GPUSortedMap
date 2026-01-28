@@ -45,6 +45,11 @@ jobs:
           TAG_VERSION=${GITHUB_REF#refs/tags/v}
           # Extract the section for this version from CHANGELOG.md
           sed -n "/## \[$TAG_VERSION\]/,/## \[/p" CHANGELOG.md | sed '$d' > release-notes.md
+          # Verify we extracted something
+          if [ ! -s release-notes.md ]; then
+            echo "Error: Could not extract release notes for version $TAG_VERSION from CHANGELOG.md"
+            exit 1
+          fi
       
       - name: Create Release
         uses: softprops/action-gh-release@v1
