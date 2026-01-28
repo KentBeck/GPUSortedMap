@@ -2,6 +2,12 @@
 name = "gpusorted_map"
 version = "0.1.0"
 edition = "2021"
+description = "GPU-accelerated sorted key/value store built on wgpu"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/KentBeck/GPUSortedMap"
+keywords = ["gpu", "wgpu", "kv", "key-value", "data-structures"]
+categories = ["data-structures", "algorithms", "hardware-support"]
 
 [dependencies]
 bytemuck = { version = "1.14", features = ["derive"] }

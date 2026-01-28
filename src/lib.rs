@@ -1,3 +1,21 @@
+//! GPU-accelerated sorted key/value store built on wgpu.
+//!
+//! # Quick start
+//!
+//! ```rust
+//! use gpusorted_map::{GpuSortedMap, KvEntry};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut map = pollster::block_on(GpuSortedMap::new(1024))?;
+//! map.bulk_put(&[
+//!     KvEntry { key: 1, value: 10 },
+//!     KvEntry { key: 2, value: 20 },
+//! ])?;
+//! assert_eq!(map.get(1), Some(10));
+//! # Ok(())
+//! # }
+//! ```
+
 mod gpu_array;
 mod pipelines;
 
@@ -7,6 +25,7 @@ use std::sync::Arc;
 use crate::gpu_array::{GpuArray, GpuStorage};
 use crate::pipelines::{BulkDeletePipeline, BulkGetPipeline, BulkPutPipeline, MergeMeta};
 
+/// Key/value pair stored in the GPU slab.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug, Default)]
 pub struct KvEntry {
@@ -16,6 +35,7 @@ pub struct KvEntry {
 
 const TOMBSTONE_VALUE: u32 = 0xFFFF_FFFF;
 
+/// GPU-backed sorted map with batched operations.
 pub struct GpuSortedMap {
     queue: Arc<wgpu::Queue>,
     slab: GpuArray<KvEntry>,
@@ -28,6 +48,7 @@ pub struct GpuSortedMap {
 }
 
 impl GpuSortedMap {
+    /// Create a new map with the given slab capacity.
     pub async fn new(capacity: u32) -> Result<Self, wgpu::RequestDeviceError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
@@ -102,10 +123,12 @@ impl GpuSortedMap {
         })
     }
 
+    /// Batch lookup of keys.
     pub fn bulk_get(&self, keys: &[u32]) -> Vec<Option<u32>> {
         self.bulk_get.execute(&self.slab, keys)
     }
 
+    /// Batch insert/update of entries.
     pub fn bulk_put(&mut self, entries: &[KvEntry]) -> Result<(), GpuMapError> {
         if entries.is_empty() {
             return Ok(());
@@ -134,41 +157,50 @@ impl GpuSortedMap {
         Ok(())
     }
 
+    /// Batch delete of keys.
     pub fn bulk_delete(&mut self, keys: &[u32]) {
         self.bulk_delete.execute(&self.slab, keys);
     }
 
+    /// Single-key lookup convenience wrapper over `bulk_get`.
     pub fn get(&self, key: u32) -> Option<u32> {
         self.bulk_get(&[key]).into_iter().next().unwrap_or(None)
     }
 
+    /// Single-key insert/update convenience wrapper over `bulk_put`.
     pub fn put(&mut self, key: u32, value: u32) -> Result<(), GpuMapError> {
         let entry = KvEntry { key, value };
         self.bulk_put(std::slice::from_ref(&entry))
     }
 
+    /// Single-key delete convenience wrapper over `bulk_delete`.
     pub fn delete(&mut self, key: u32) {
         self.bulk_delete(std::slice::from_ref(&key));
     }
 
+    /// Total slab capacity.
     pub fn capacity(&self) -> u32 {
         self.slab.capacity()
     }
 
+    /// Current number of stored entries.
     pub fn len(&self) -> u32 {
         self.slab.len()
     }
 
     #[must_use]
+    /// Returns true if the map is empty.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    /// Update the stored length metadata.
     pub fn update_len(&mut self, new_len: u32) {
         self.slab.update_len(&self.queue, new_len);
     }
 }
 
+/// Errors returned by `GpuSortedMap` operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpuMapError {
     CapacityExceeded { capacity: u32, requested: u32 },
