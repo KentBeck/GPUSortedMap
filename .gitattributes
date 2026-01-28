@@ -1,0 +1,37 @@
+# Auto detect text files and normalize line endings to LF
+* text=auto eol=lf
+
+# Rust source files
+*.rs text eol=lf
+
+# TOML files
+*.toml text eol=lf
+
+# Markdown documentation
+*.md text eol=lf
+
+# Shell scripts
+*.sh text eol=lf
+
+# YAML files
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Lock files (binary)
+Cargo.lock binary
+
+# Archives
+*.zip binary
+*.tar binary
+*.gz binary
+
+# Images
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+
+# Fonts
+*.woff binary
+*.woff2 binary

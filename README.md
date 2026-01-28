@@ -164,6 +164,13 @@ cargo bench --bench perf
 
 This crate is experimental and the public API may change.
 
+## Documentation
+
+- **API Documentation**: [docs.rs/gpusorted_map](https://docs.rs/gpusorted_map)
+- **Development Guide**: See [DEVELOPMENT.md](DEVELOPMENT.md) for contribution setup
+- **Examples**: Check the [examples/](examples/) directory
+- **Changelog**: See [CHANGELOG.md](CHANGELOG.md) for version history
+
 ## Roadmap
 
 See `ROADMAP.md`.
