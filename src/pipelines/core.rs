@@ -45,14 +45,18 @@ impl ComputeStep {
         }
     }
 
-    pub fn create_bind_group(&self, label: &str, entries: &[wgpu::BindGroupEntry]) -> wgpu::BindGroup {
+    pub fn create_bind_group(
+        &self,
+        label: &str,
+        entries: &[wgpu::BindGroupEntry],
+    ) -> wgpu::BindGroup {
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some(label),
             layout: &self.bind_group_layout,
             entries,
         })
     }
-    
+
     pub fn dispatch(
         &self,
         encoder: &mut wgpu::CommandEncoder,

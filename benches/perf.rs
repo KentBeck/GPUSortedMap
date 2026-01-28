@@ -25,13 +25,7 @@ fn main() {
         let (btree_put, btree_get) = bench_btree(&keys);
         let (gpu_put, gpu_get) = bench_gpu(&entries, &keys);
 
-        rows.push((
-            size,
-            btree_put,
-            btree_get,
-            gpu_put,
-            gpu_get,
-        ));
+        rows.push((size, btree_put, btree_get, gpu_put, gpu_get));
     }
 
     let commit = git_head().unwrap_or_else(|| "unknown".to_string());
@@ -45,11 +39,8 @@ fn main() {
     let filename = format!("{commit}_{stamp}.csv");
     let path = dir.join(filename);
     let mut file = File::create(&path).expect("failed to create perf output file");
-    writeln!(
-        file,
-        "size,btree_put_ms,btree_get_ms,gpu_put_ms,gpu_get_ms"
-    )
-    .expect("failed to write header");
+    writeln!(file, "size,btree_put_ms,btree_get_ms,gpu_put_ms,gpu_get_ms")
+        .expect("failed to write header");
 
     for (size, btree_put, btree_get, gpu_put, gpu_get) in rows {
         writeln!(

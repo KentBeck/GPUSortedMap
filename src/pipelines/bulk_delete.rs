@@ -117,9 +117,11 @@ impl BulkDeletePipeline {
             ],
         );
 
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("bulk-delete-encoder"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("bulk-delete-encoder"),
+            });
 
         let workgroups = ((keys.len() as u32) + 63) / 64;
         self.step.dispatch(

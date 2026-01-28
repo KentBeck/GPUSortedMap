@@ -212,7 +212,9 @@ mod tests {
         let array = GpuArray::<u32>::new(
             &device,
             4,
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
             "test-buffer",
         );
 

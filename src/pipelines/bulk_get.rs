@@ -145,13 +145,19 @@ impl BulkGetPipeline {
             ],
         );
 
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("bulk-get-encoder"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("bulk-get-encoder"),
+            });
 
         let workgroups = ((keys.len() as u32) + 63) / 64;
-        self.step
-            .dispatch(&mut encoder, "bulk-get-pass", &bind_group, (workgroups, 1, 1));
+        self.step.dispatch(
+            &mut encoder,
+            "bulk-get-pass",
+            &bind_group,
+            (workgroups, 1, 1),
+        );
 
         encoder.copy_buffer_to_buffer(
             &results_buffer,

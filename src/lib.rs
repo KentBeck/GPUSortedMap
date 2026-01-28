@@ -127,13 +127,9 @@ impl GpuSortedMap {
         }
 
         self.input.write(&self.queue, entries);
-        let merge_len = self.bulk_put.execute(
-            &self.slab,
-            &self.input,
-            &self.merge,
-            &self.merge_meta,
-            len,
-        )?;
+        let merge_len =
+            self.bulk_put
+                .execute(&self.slab, &self.input, &self.merge, &self.merge_meta, len)?;
         self.update_len(merge_len);
         Ok(())
     }
@@ -182,7 +178,10 @@ pub enum GpuMapError {
 impl std::fmt::Display for GpuMapError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            GpuMapError::CapacityExceeded { capacity, requested } => {
+            GpuMapError::CapacityExceeded {
+                capacity,
+                requested,
+            } => {
                 write!(
                     f,
                     "Capacity exceeded: requested {} entries but capacity is {}",
@@ -265,7 +264,10 @@ mod tests {
     fn put_rejects_tombstone_value() {
         let mut map = pollster::block_on(GpuSortedMap::new(4)).unwrap();
         let err = map.put(1, 0xFFFF_FFFF).unwrap_err();
-        assert!(matches!(err, super::GpuMapError::TombstoneValueReserved { .. }));
+        assert!(matches!(
+            err,
+            super::GpuMapError::TombstoneValueReserved { .. }
+        ));
     }
 
     #[test]
@@ -294,7 +296,10 @@ mod tests {
         let mut map = pollster::block_on(GpuSortedMap::new(6)).unwrap();
         let entries = vec![KvEntry { key: 1, value: 1 }; 5];
         let res = map.bulk_put(&entries);
-        assert!(matches!(res, Err(super::GpuMapError::CapacityExceeded { .. })));
+        assert!(matches!(
+            res,
+            Err(super::GpuMapError::CapacityExceeded { .. })
+        ));
     }
 
     #[test]

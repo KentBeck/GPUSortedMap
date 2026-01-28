@@ -251,9 +251,10 @@ impl BulkPutPipeline {
                     .write_buffer(&sort_params_buffer, 0, bytemuck::bytes_of(&params));
 
                 let mut sort_encoder =
-                    self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("bulk-sort-encoder"),
-                    });
+                    self.device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("bulk-sort-encoder"),
+                        });
                 self.sort_step.dispatch(
                     &mut sort_encoder,
                     "bulk-sort-pass",
@@ -303,8 +304,12 @@ impl BulkPutPipeline {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("bulk-put-encoder"),
             });
-        self.dedup_step
-            .dispatch(&mut encoder, "bulk-dedup-pass", &dedup_bind_group, (1, 1, 1));
+        self.dedup_step.dispatch(
+            &mut encoder,
+            "bulk-dedup-pass",
+            &dedup_bind_group,
+            (1, 1, 1),
+        );
 
         let dedup_readback = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("bulk-dedup-readback"),
