@@ -44,6 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 - `bulk_put(&[KvEntry]) -> Result<(), GpuMapError>`
 - `bulk_get(&[u32]) -> Vec<Option<u32>>`
 - `bulk_delete(&[u32])`
+- `range(from_key, to_key) -> Vec<KvEntry>` (half-open range)
 - Convenience helpers: `put`, `get`, `delete`
 
 Notes:
