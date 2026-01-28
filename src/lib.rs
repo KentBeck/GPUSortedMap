@@ -258,9 +258,8 @@ impl GpuSortedMap {
             });
         }
 
-        let unique_keys = unique_keys_from_entries(entries).map_err(|key| {
-            GpuMapError::DuplicateKeys { key }
-        })?;
+        let unique_keys =
+            unique_keys_from_entries(entries).map_err(|key| GpuMapError::DuplicateKeys { key })?;
         let existing = self.count_existing_keys(&unique_keys);
         let net_new = unique_keys.len().saturating_sub(existing) as u32;
         let requested = Length::new(self.slab.len().0 + net_new);

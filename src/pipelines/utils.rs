@@ -6,7 +6,7 @@ pub fn create_buffer_with_data<T: Pod>(
     usage: wgpu::BufferUsages,
     data: &[T],
 ) -> wgpu::Buffer {
-    let size = (data.len() * std::mem::size_of::<T>()) as u64;
+    let size = std::mem::size_of_val(data) as u64;
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
         size,
