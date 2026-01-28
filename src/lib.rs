@@ -258,7 +258,9 @@ impl GpuSortedMap {
             });
         }
 
-        let unique_keys = unique_keys_from_entries(entries);
+        let unique_keys = unique_keys_from_entries(entries).map_err(|key| {
+            GpuMapError::DuplicateKeys { key }
+        })?;
         let existing = self.count_existing_keys(&unique_keys);
         let net_new = unique_keys.len().saturating_sub(existing) as u32;
         let requested = Length::new(self.slab.len().0 + net_new);
@@ -267,10 +269,6 @@ impl GpuSortedMap {
                 capacity: self.slab.capacity(),
                 requested,
             });
-        }
-
-        if !unique_keys.is_empty() {
-            self.bulk_delete.execute(&self.slab, &unique_keys);
         }
 
         self.input.write(&self.queue, entries);
@@ -359,15 +357,16 @@ impl GpuSortedMap {
     }
 }
 
-fn unique_keys_from_entries(entries: &[KvEntry]) -> Vec<Key> {
+fn unique_keys_from_entries(entries: &[KvEntry]) -> Result<Vec<Key>, Key> {
     let mut seen = HashSet::with_capacity(entries.len());
     let mut keys = Vec::with_capacity(entries.len());
     for entry in entries {
-        if seen.insert(entry.key) {
-            keys.push(entry.key);
+        if !seen.insert(entry.key) {
+            return Err(entry.key);
         }
+        keys.push(entry.key);
     }
-    keys
+    Ok(keys)
 }
 
 fn unique_keys(keys: &[Key]) -> Vec<Key> {
@@ -391,6 +390,9 @@ pub enum GpuMapError {
     TombstoneValueReserved {
         value: Value,
     },
+    DuplicateKeys {
+        key: Key,
+    },
 }
 
 impl std::fmt::Display for GpuMapError {
@@ -412,6 +414,9 @@ impl std::fmt::Display for GpuMapError {
                     "Value 0x{:08X} is reserved as tombstone marker and cannot be used",
                     value.0
                 )
+            }
+            GpuMapError::DuplicateKeys { key } => {
+                write!(f, "Duplicate key in batch: {}", key.0)
             }
         }
     }
@@ -691,12 +696,27 @@ mod tests {
         // High-level: 5 <= 6. OK.
         // Internal: next_power_of_two(5) = 8. 8 > 6. FAIL.
         let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(6))).unwrap();
-        let entries = vec![
+        let entries = [
             KvEntry {
                 key: k(1),
-                value: v(1)
-            };
-            5
+                value: v(1),
+            },
+            KvEntry {
+                key: k(2),
+                value: v(2),
+            },
+            KvEntry {
+                key: k(3),
+                value: v(3),
+            },
+            KvEntry {
+                key: k(4),
+                value: v(4),
+            },
+            KvEntry {
+                key: k(5),
+                value: v(5),
+            },
         ];
         let res = map.bulk_put(&entries);
         assert!(matches!(
@@ -750,5 +770,28 @@ mod tests {
         map.bulk_delete(&[k(1), k(2)]);
         assert_eq!(map.len(), Length::new(0));
         assert!(map.is_empty());
+    }
+
+    #[test]
+    fn duplicate_keys_in_bulk_put_is_error_and_atomic() {
+        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(8))).unwrap();
+        map.put(k(1), v(10)).unwrap();
+
+        let entries = [
+            KvEntry {
+                key: k(2),
+                value: v(20),
+            },
+            KvEntry {
+                key: k(2),
+                value: v(30),
+            },
+        ];
+        let err = map.bulk_put(&entries).unwrap_err();
+        assert!(matches!(err, super::GpuMapError::DuplicateKeys { .. }));
+
+        assert_eq!(map.get(k(1)), Some(v(10)));
+        assert_eq!(map.get(k(2)), None);
+        assert_eq!(map.len(), Length::new(1));
     }
 }

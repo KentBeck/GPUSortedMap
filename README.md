@@ -56,6 +56,7 @@ Notes:
 - `0xFFFF_FFFF` is reserved as the tombstone value.
 - `bulk_put` returns `GpuMapError::CapacityExceeded` when the requested size
   exceeds the slab capacity.
+- `bulk_put` returns `GpuMapError::DuplicateKeys` if the batch contains the same key twice.
 - `len()` reports live entries (tombstones excluded).
 
 ## Benchmarks
