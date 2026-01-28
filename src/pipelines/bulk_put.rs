@@ -585,61 +585,52 @@ fn merge_partition(k: u32, slab_len: u32, input_len: u32) -> vec2<u32> {
     return vec2<u32>(i, j);
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x > 0u) {
+        return;
+    }
+
     let slab_len = slab_meta.len;
     let input_len = input_meta.len;
-    let total_len = slab_len + input_len;
-    if (total_len == 0u) {
-        if (gid.x == 0u) {
-            merge_meta.len = 0u;
-        }
+    if (slab_len == 0u && input_len == 0u) {
+        merge_meta.len = 0u;
         return;
     }
 
-    let chunk_size: u32 = 256u;
-    let chunk_count = (total_len + chunk_size - 1u) / chunk_size;
-    let chunk_index = gid.x;
-    if (chunk_index >= chunk_count) {
-        return;
-    }
+    var i: u32 = 0u;
+    var j: u32 = 0u;
+    var k: u32 = 0u;
 
-    let k0 = chunk_index * chunk_size;
-    var k1 = k0 + chunk_size;
-    if (k1 > total_len) {
-        k1 = total_len;
-    }
-
-    let start = merge_partition(k0, slab_len, input_len);
-    let end = merge_partition(k1, slab_len, input_len);
-
-    var i = start.x;
-    var j = start.y;
-    var k = k0;
-
-    while (k < k1) {
-        if (i < end.x && j < end.y) {
-            let a = slab[i];
-            let b = input[j];
-            if (a.key < b.key) {
-                output[k] = a;
-                i = i + 1u;
-            } else {
-                output[k] = b;
-                j = j + 1u;
-            }
-        } else if (i < end.x) {
-            output[k] = slab[i];
+    while (i < slab_len && j < input_len) {
+        let a = slab[i];
+        let b = input[j];
+        if (a.key < b.key) {
+            output[k] = a;
             i = i + 1u;
+        } else if (b.key < a.key) {
+            output[k] = b;
+            j = j + 1u;
         } else {
-            output[k] = input[j];
+            output[k] = b;
+            i = i + 1u;
             j = j + 1u;
         }
         k = k + 1u;
     }
 
-    if (chunk_index == 0u) {
-        merge_meta.len = total_len;
+    while (i < slab_len) {
+        output[k] = slab[i];
+        i = i + 1u;
+        k = k + 1u;
     }
+
+    while (j < input_len) {
+        output[k] = input[j];
+        j = j + 1u;
+        k = k + 1u;
+    }
+
+    merge_meta.len = k;
 }
 "#;

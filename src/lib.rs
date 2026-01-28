@@ -20,6 +20,7 @@ mod gpu_array;
 mod pipelines;
 
 use bytemuck::{Pod, Zeroable};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::gpu_array::{GpuArray, GpuStorage};
@@ -29,7 +30,7 @@ use crate::pipelines::{
 
 /// Key wrapper to distinguish keys from other `u32` values.
 #[repr(transparent)]
-#[derive(Clone, Copy, Pod, Zeroable, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Key(pub u32);
 
 impl Key {
@@ -148,6 +149,7 @@ pub struct GpuSortedMap {
     bulk_delete: BulkDeletePipeline,
     bulk_put: BulkPutPipeline,
     range_scan: RangeScanPipeline,
+    live_len: Length,
 }
 
 impl GpuSortedMap {
@@ -235,6 +237,7 @@ impl GpuSortedMap {
             bulk_delete,
             bulk_put,
             range_scan,
+            live_len: Length::new(0),
         })
     }
 
@@ -255,8 +258,10 @@ impl GpuSortedMap {
             });
         }
 
-        let len = Length::new(entries.len() as u32);
-        let requested = Length::new(self.slab.len().0 + len.0);
+        let unique_keys = unique_keys_from_entries(entries);
+        let existing = self.count_existing_keys(&unique_keys);
+        let net_new = unique_keys.len().saturating_sub(existing) as u32;
+        let requested = Length::new(self.slab.len().0 + net_new);
         if requested.0 > self.slab.capacity().0 {
             return Err(GpuMapError::CapacityExceeded {
                 capacity: self.slab.capacity(),
@@ -264,7 +269,12 @@ impl GpuSortedMap {
             });
         }
 
+        if !unique_keys.is_empty() {
+            self.bulk_delete.execute(&self.slab, &unique_keys);
+        }
+
         self.input.write(&self.queue, entries);
+        let len = Length::new(entries.len() as u32);
         let merge_len = self.bulk_put.execute(
             &self.slab,
             &self.input,
@@ -273,12 +283,19 @@ impl GpuSortedMap {
             len.0,
         )?;
         self.update_len(Length::new(merge_len));
+        self.live_len = Length::new(self.live_len.0 + net_new);
         Ok(())
     }
 
     /// Batch delete of keys.
     pub fn bulk_delete(&mut self, keys: &[Key]) {
-        self.bulk_delete.execute(&self.slab, keys);
+        if keys.is_empty() {
+            return;
+        }
+        let unique_keys = unique_keys(keys);
+        let existing = self.count_existing_keys(&unique_keys);
+        self.bulk_delete.execute(&self.slab, &unique_keys);
+        self.live_len = Length::new(self.live_len.0.saturating_sub(existing as u32));
     }
 
     /// Single-key lookup convenience wrapper over `bulk_get`.
@@ -316,21 +333,52 @@ impl GpuSortedMap {
         self.slab.capacity()
     }
 
-    /// Current number of stored entries.
+    /// Current number of live entries (tombstones are excluded).
     pub fn len(&self) -> Length {
-        self.slab.len()
+        self.live_len
     }
 
     #[must_use]
     /// Returns true if the map is empty.
     pub fn is_empty(&self) -> bool {
-        self.len().0 == 0
+        self.live_len.0 == 0
     }
 
-    /// Update the stored length metadata.
+    /// Update the stored slab length metadata.
+    ///
+    /// This does not change the live entry count returned by `len()`.
     pub fn update_len(&mut self, new_len: Length) {
         self.slab.update_len(&self.queue, new_len);
     }
+
+    fn count_existing_keys(&self, keys: &[Key]) -> usize {
+        if keys.is_empty() {
+            return 0;
+        }
+        self.bulk_get(keys).iter().filter(|v| v.is_some()).count()
+    }
+}
+
+fn unique_keys_from_entries(entries: &[KvEntry]) -> Vec<Key> {
+    let mut seen = HashSet::with_capacity(entries.len());
+    let mut keys = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if seen.insert(entry.key) {
+            keys.push(entry.key);
+        }
+    }
+    keys
+}
+
+fn unique_keys(keys: &[Key]) -> Vec<Key> {
+    let mut seen = HashSet::with_capacity(keys.len());
+    let mut out = Vec::with_capacity(keys.len());
+    for &key in keys {
+        if seen.insert(key) {
+            out.push(key);
+        }
+    }
+    out
 }
 
 /// Errors returned by `GpuSortedMap` operations.
@@ -670,5 +718,37 @@ mod tests {
         map.put(k(1), v(10)).unwrap();
         assert!(!map.is_empty());
         assert_eq!(map.len(), Length::new(1));
+    }
+
+    #[test]
+    fn update_overwrites_existing_key() {
+        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(8))).unwrap();
+        map.put(k(1), v(10)).unwrap();
+        map.put(k(1), v(20)).unwrap();
+
+        assert_eq!(map.get(k(1)), Some(v(20)));
+        let entries = map.range(k(1), k(2));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].value, v(20));
+        assert_eq!(map.len(), Length::new(1));
+    }
+
+    #[test]
+    fn delete_reduces_live_len() {
+        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(8))).unwrap();
+        map.bulk_put(&[
+            KvEntry {
+                key: k(1),
+                value: v(10),
+            },
+            KvEntry {
+                key: k(2),
+                value: v(20),
+            },
+        ])
+        .unwrap();
+        map.bulk_delete(&[k(1), k(2)]);
+        assert_eq!(map.len(), Length::new(0));
+        assert!(map.is_empty());
     }
 }
