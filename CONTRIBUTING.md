@@ -7,7 +7,8 @@ Thanks for helping improve GPUSortedMap.
 - Rust stable
 - A working GPU backend supported by wgpu (Metal/Vulkan/D3D12)
 
-Tests and benches require a GPU adapter and will fail in headless CI.
+Tests attempt to use a fallback adapter if no GPU is present. If no software
+adapter is available, tests may fail.
 
 ## Common commands
 

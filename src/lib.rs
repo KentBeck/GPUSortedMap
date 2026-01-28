@@ -54,14 +54,24 @@ impl GpuSortedMap {
             backends: wgpu::Backends::all(),
             ..Default::default()
         });
-        let adapter = instance
+        let adapter = match instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: None,
                 force_fallback_adapter: false,
             })
             .await
-            .expect("no suitable GPU adapters found");
+        {
+            Some(adapter) => adapter,
+            None => instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::LowPower,
+                    compatible_surface: None,
+                    force_fallback_adapter: true,
+                })
+                .await
+                .expect("no suitable GPU adapters found (including fallback)"),
+        };
 
         let (device, queue) = adapter
             .request_device(

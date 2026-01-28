@@ -36,8 +36,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 - A working GPU backend supported by wgpu (Metal on macOS, Vulkan on Linux,
   D3D12 on Windows).
-- Tests and benches require a GPU adapter; they will fail on headless CI
-  machines without a GPU.
+- Tests attempt to use a fallback adapter if no GPU is present. If no
+  software adapter is available, tests may fail.
 
 ## API overview
 
