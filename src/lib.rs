@@ -583,8 +583,15 @@ mod tests {
 
     #[test]
     fn creates_gpu_sorted_map() {
-        if try_create_map(Capacity::new(1024)).is_some() {
-            // Test passes if we can create a map
+        // Test that GPU map creation either succeeds with a GPU or fails gracefully without one
+        match try_create_map(Capacity::new(1024)) {
+            Some(map) => {
+                // If GPU is available, verify the map was created with correct capacity
+                assert_eq!(map.capacity(), Capacity::new(1024));
+            }
+            None => {
+                // Test passes if GPU is not available (already logged by helper)
+            }
         }
     }
 

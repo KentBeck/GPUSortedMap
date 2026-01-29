@@ -147,19 +147,24 @@ mod tests {
                     .await?
             }
         };
-        Some(
-            adapter
-                .request_device(
-                    &wgpu::DeviceDescriptor {
-                        label: Some("gpu-array-test-device"),
-                        required_features: wgpu::Features::empty(),
-                        required_limits: wgpu::Limits::default(),
-                    },
-                    None,
-                )
-                .await
-                .ok(),
-        )?
+        let device_result = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("gpu-array-test-device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::default(),
+                },
+                None,
+            )
+            .await;
+
+        match device_result {
+            Ok(device) => Some(device),
+            Err(e) => {
+                eprintln!("Failed to request GPU device: {}", e);
+                None
+            }
+        }
     }
 
     macro_rules! skip_if_no_gpu_device {
