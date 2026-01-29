@@ -123,7 +123,7 @@ mod tests {
     use crate::pipelines::utils::readback_vec;
     use crate::{Capacity, Length};
 
-    async fn create_device_queue() -> (wgpu::Device, wgpu::Queue) {
+    async fn create_device_queue() -> Option<(wgpu::Device, wgpu::Queue)> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
@@ -137,26 +137,38 @@ mod tests {
             .await
         {
             Some(adapter) => adapter,
-            None => instance
-                .request_adapter(&wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::LowPower,
-                    compatible_surface: None,
-                    force_fallback_adapter: true,
-                })
-                .await
-                .expect("no suitable GPU adapters found (including fallback)"),
+            None => {
+                instance
+                    .request_adapter(&wgpu::RequestAdapterOptions {
+                        power_preference: wgpu::PowerPreference::LowPower,
+                        compatible_surface: None,
+                        force_fallback_adapter: true,
+                    })
+                    .await?
+            }
         };
-        adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("gpu-array-test-device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
-                },
-                None,
-            )
-            .await
-            .expect("failed to request device")
+        Some(
+            adapter
+                .request_device(
+                    &wgpu::DeviceDescriptor {
+                        label: Some("gpu-array-test-device"),
+                        required_features: wgpu::Features::empty(),
+                        required_limits: wgpu::Limits::default(),
+                    },
+                    None,
+                )
+                .await
+                .ok(),
+        )?
+    }
+
+    macro_rules! skip_if_no_gpu_device {
+        ($device:ident, $queue:ident) => {
+            let Some(($device, $queue)) = pollster::block_on(create_device_queue()) else {
+                eprintln!("Skipping test: GPU not available in this environment");
+                return;
+            };
+        };
     }
 
     fn readback_gpu_array<T: bytemuck::Pod>(
@@ -183,7 +195,7 @@ mod tests {
 
     #[test]
     fn creates_with_capacity() {
-        let (device, _queue) = pollster::block_on(create_device_queue());
+        skip_if_no_gpu_device!(device, _queue);
         let array = GpuArray::<u32>::new(
             &device,
             Capacity::new(4),
@@ -196,7 +208,7 @@ mod tests {
 
     #[test]
     fn update_len_clamps_and_updates_meta() {
-        let (device, queue) = pollster::block_on(create_device_queue());
+        skip_if_no_gpu_device!(device, queue);
         let mut array = GpuArray::<u32>::new(
             &device,
             Capacity::new(4),
@@ -220,7 +232,7 @@ mod tests {
 
     #[test]
     fn write_persists_data() {
-        let (device, queue) = pollster::block_on(create_device_queue());
+        skip_if_no_gpu_device!(device, queue);
         let array = GpuArray::<u32>::new(
             &device,
             Capacity::new(4),
@@ -244,7 +256,7 @@ mod tests {
 
     #[test]
     fn write_empty_does_nothing() {
-        let (device, queue) = pollster::block_on(create_device_queue());
+        skip_if_no_gpu_device!(device, queue);
         let array = GpuArray::<u32>::new(
             &device,
             Capacity::new(4),

@@ -128,25 +128,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - uses: dtolnay/rust-toolchain@1.73.0
+      - uses: dtolnay/rust-toolchain@1.79.0
       
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
           path: ~/.cargo/registry
-          key: ${{ runner.os }}-1.73.0-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-1.79.0-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
       
       - name: Cache cargo index
         uses: actions/cache@v4
         with:
           path: ~/.cargo/git
-          key: ${{ runner.os }}-1.73.0-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-1.79.0-cargo-index-${{ hashFiles('**/Cargo.lock') }}
       
       - name: Cache cargo build
         uses: actions/cache@v4
         with:
           path: target
-          key: ${{ runner.os }}-1.73.0-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-1.79.0-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
       
       - name: Check MSRV
         run: cargo check --all-features
