@@ -2,6 +2,7 @@
 name = "gpusorted_map"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.77"
 description = "GPU-accelerated sorted key/value store built on wgpu"
 license = "MIT"
 readme = "README.md"

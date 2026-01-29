@@ -2,7 +2,7 @@
 //!
 //! # Quick start
 //!
-//! ```rust
+//! ```rust,no_run
 //! use gpusorted_map::{Capacity, GpuSortedMap, Key, KvEntry, Value};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -21,12 +21,46 @@ mod pipelines;
 
 use bytemuck::{Pod, Zeroable};
 use std::collections::HashSet;
+use std::fmt;
 use std::sync::Arc;
 
 use crate::gpu_array::{GpuArray, GpuStorage};
 use crate::pipelines::{
     BulkDeletePipeline, BulkGetPipeline, BulkPutPipeline, MergeMeta, RangeScanPipeline,
 };
+
+/// Error type for GPU-related failures
+#[derive(Debug)]
+pub enum GpuError {
+    /// No suitable GPU adapter found
+    NoAdapter,
+    /// Device request failed
+    DeviceRequest(wgpu::RequestDeviceError),
+}
+
+impl fmt::Display for GpuError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GpuError::NoAdapter => write!(f, "no suitable GPU adapters found (including fallback)"),
+            GpuError::DeviceRequest(e) => write!(f, "failed to request device: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for GpuError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            GpuError::NoAdapter => None,
+            GpuError::DeviceRequest(e) => Some(e),
+        }
+    }
+}
+
+impl From<wgpu::RequestDeviceError> for GpuError {
+    fn from(err: wgpu::RequestDeviceError) -> Self {
+        GpuError::DeviceRequest(err)
+    }
+}
 
 /// Key wrapper to distinguish keys from other `u32` values.
 #[repr(transparent)]
@@ -154,7 +188,7 @@ pub struct GpuSortedMap {
 
 impl GpuSortedMap {
     /// Create a new map with the given slab capacity.
-    pub async fn new(capacity: Capacity) -> Result<Self, wgpu::RequestDeviceError> {
+    pub async fn new(capacity: Capacity) -> Result<Self, GpuError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
@@ -175,7 +209,7 @@ impl GpuSortedMap {
                     force_fallback_adapter: true,
                 })
                 .await
-                .expect("no suitable GPU adapters found (including fallback)"),
+                .ok_or(GpuError::NoAdapter)?,
         };
 
         let (device, queue) = adapter
@@ -258,9 +292,8 @@ impl GpuSortedMap {
             });
         }
 
-        let unique_keys = unique_keys_from_entries(entries).map_err(|key| {
-            GpuMapError::DuplicateKeys { key }
-        })?;
+        let unique_keys =
+            unique_keys_from_entries(entries).map_err(|key| GpuMapError::DuplicateKeys { key })?;
         let existing = self.count_existing_keys(&unique_keys);
         let net_new = unique_keys.len().saturating_sub(existing) as u32;
         let requested = Length::new(self.slab.len().0 + net_new);
@@ -426,7 +459,21 @@ impl std::error::Error for GpuMapError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{Capacity, GpuSortedMap, Key, KvEntry, Length, Value};
+    use super::{Capacity, GpuError, GpuSortedMap, Key, KvEntry, Length, Value};
+
+    /// Macro to skip test if GPU is not available
+    macro_rules! require_gpu {
+        ($capacity:expr) => {
+            match pollster::block_on(GpuSortedMap::new($capacity)) {
+                Ok(map) => map,
+                Err(GpuError::NoAdapter) => {
+                    eprintln!("Skipping test: no GPU adapter available");
+                    return;
+                }
+                Err(e) => panic!("Failed to create GpuSortedMap: {}", e),
+            }
+        };
+    }
 
     fn k(value: u32) -> Key {
         Key::new(value)
@@ -439,12 +486,20 @@ mod tests {
     #[test]
     fn creates_gpu_sorted_map() {
         let map = pollster::block_on(GpuSortedMap::new(Capacity::new(1024)));
-        assert!(map.is_ok(), "GpuSortedMap::new should succeed");
+        match map {
+            Ok(_) => {
+                // Successfully created GPU map
+            }
+            Err(GpuError::NoAdapter) => {
+                eprintln!("Skipping test: no GPU adapter available");
+            }
+            Err(e) => panic!("Failed to create GpuSortedMap: {}", e),
+        }
     }
 
     #[test]
     fn put_then_get() {
-        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(8))).unwrap();
+        let mut map = require_gpu!(Capacity::new(8));
         let entries = [
             KvEntry {
                 key: k(42),
@@ -467,20 +522,20 @@ mod tests {
 
     #[test]
     fn single_put_then_get() {
-        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(4))).unwrap();
+        let mut map = require_gpu!(Capacity::new(4));
         map.put(k(5), v(11)).unwrap();
         assert_eq!(map.get(k(5)), Some(v(11)));
     }
 
     #[test]
     fn single_get_missing_key() {
-        let map = pollster::block_on(GpuSortedMap::new(Capacity::new(4))).unwrap();
+        let map = require_gpu!(Capacity::new(4));
         assert_eq!(map.get(k(9)), None);
     }
 
     #[test]
     fn bulk_delete_clears_values() {
-        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(8))).unwrap();
+        let mut map = require_gpu!(Capacity::new(8));
         let entries = [
             KvEntry {
                 key: k(1),
@@ -503,7 +558,7 @@ mod tests {
 
     #[test]
     fn delete_single_key() {
-        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(4))).unwrap();
+        let mut map = require_gpu!(Capacity::new(4));
         map.put(k(9), v(99)).unwrap();
         map.delete(k(9));
         assert_eq!(map.get(k(9)), None);
@@ -511,7 +566,7 @@ mod tests {
 
     #[test]
     fn range_returns_half_open_interval() {
-        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(16))).unwrap();
+        let mut map = require_gpu!(Capacity::new(16));
         map.bulk_put(&[
             KvEntry {
                 key: k(1),
@@ -539,7 +594,7 @@ mod tests {
 
     #[test]
     fn range_empty_when_from_equals_to() {
-        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(16))).unwrap();
+        let mut map = require_gpu!(Capacity::new(16));
         map.bulk_put(&[
             KvEntry {
                 key: k(1),
@@ -556,7 +611,7 @@ mod tests {
 
     #[test]
     fn range_empty_when_from_greater_than_to() {
-        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(16))).unwrap();
+        let mut map = require_gpu!(Capacity::new(16));
         map.bulk_put(&[
             KvEntry {
                 key: k(1),
@@ -573,13 +628,13 @@ mod tests {
 
     #[test]
     fn range_empty_on_empty_map() {
-        let map = pollster::block_on(GpuSortedMap::new(Capacity::new(16))).unwrap();
+        let map = require_gpu!(Capacity::new(16));
         assert!(map.range(k(0), k(10)).is_empty());
     }
 
     #[test]
     fn range_outside_bounds_is_empty() {
-        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(16))).unwrap();
+        let mut map = require_gpu!(Capacity::new(16));
         map.bulk_put(&[
             KvEntry {
                 key: k(10),
@@ -597,7 +652,7 @@ mod tests {
 
     #[test]
     fn range_clamps_to_existing_keys() {
-        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(16))).unwrap();
+        let mut map = require_gpu!(Capacity::new(16));
         map.bulk_put(&[
             KvEntry {
                 key: k(5),
@@ -619,7 +674,7 @@ mod tests {
 
     #[test]
     fn range_starts_between_keys() {
-        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(16))).unwrap();
+        let mut map = require_gpu!(Capacity::new(16));
         map.bulk_put(&[
             KvEntry {
                 key: k(10),
@@ -641,7 +696,7 @@ mod tests {
 
     #[test]
     fn range_excludes_tombstones() {
-        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(16))).unwrap();
+        let mut map = require_gpu!(Capacity::new(16));
         map.bulk_put(&[
             KvEntry {
                 key: k(1),
@@ -664,7 +719,7 @@ mod tests {
 
     #[test]
     fn put_rejects_tombstone_value() {
-        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(4))).unwrap();
+        let mut map = require_gpu!(Capacity::new(4));
         let err = map.put(k(1), v(0xFFFF_FFFF)).unwrap_err();
         assert!(matches!(
             err,
@@ -674,14 +729,14 @@ mod tests {
 
     #[test]
     fn bulk_get_empty_keys() {
-        let map = pollster::block_on(GpuSortedMap::new(Capacity::new(10))).unwrap();
+        let map = require_gpu!(Capacity::new(10));
         let results = map.bulk_get(&[]);
         assert!(results.is_empty());
     }
 
     #[test]
     fn bulk_delete_empty_keys() {
-        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(10))).unwrap();
+        let mut map = require_gpu!(Capacity::new(10));
         map.put(k(1), v(10)).unwrap();
         map.bulk_delete(&[]);
         assert_eq!(map.get(k(1)), Some(v(10)));
@@ -695,7 +750,7 @@ mod tests {
         // If I use capacity 6 and entries 5.
         // High-level: 5 <= 6. OK.
         // Internal: next_power_of_two(5) = 8. 8 > 6. FAIL.
-        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(6))).unwrap();
+        let mut map = require_gpu!(Capacity::new(6));
         let entries = [
             KvEntry {
                 key: k(1),
@@ -727,14 +782,14 @@ mod tests {
 
     #[test]
     fn is_empty_returns_true_for_new_map() {
-        let map = pollster::block_on(GpuSortedMap::new(Capacity::new(10))).unwrap();
+        let map = require_gpu!(Capacity::new(10));
         assert!(map.is_empty());
         assert_eq!(map.len(), Length::new(0));
     }
 
     #[test]
     fn is_empty_returns_false_after_insert() {
-        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(10))).unwrap();
+        let mut map = require_gpu!(Capacity::new(10));
         map.put(k(1), v(10)).unwrap();
         assert!(!map.is_empty());
         assert_eq!(map.len(), Length::new(1));
@@ -742,7 +797,7 @@ mod tests {
 
     #[test]
     fn update_overwrites_existing_key() {
-        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(8))).unwrap();
+        let mut map = require_gpu!(Capacity::new(8));
         map.put(k(1), v(10)).unwrap();
         map.put(k(1), v(20)).unwrap();
 
@@ -755,7 +810,7 @@ mod tests {
 
     #[test]
     fn delete_reduces_live_len() {
-        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(8))).unwrap();
+        let mut map = require_gpu!(Capacity::new(8));
         map.bulk_put(&[
             KvEntry {
                 key: k(1),
@@ -774,7 +829,7 @@ mod tests {
 
     #[test]
     fn duplicate_keys_in_bulk_put_is_error_and_atomic() {
-        let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(8))).unwrap();
+        let mut map = require_gpu!(Capacity::new(8));
         map.put(k(1), v(10)).unwrap();
 
         let entries = [
