@@ -1,2 +1,20 @@
+# Rust build artifacts
 /target
+
+# IDE and editor files
 /.idea
+/.vscode
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Benchmark output
+/perf/*.csv
+
+# Documentation build
+/doc
+
+# Test artifacts
+*.profraw
+*.profdata

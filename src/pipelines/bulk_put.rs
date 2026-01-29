@@ -235,7 +235,7 @@ impl BulkPutPipeline {
             ],
         );
 
-        let workgroups = ((padded_len + 63) / 64) as u32;
+        let workgroups = padded_len.div_ceil(64);
         let mut k = 2u32;
         let max_k = padded_len;
         while k <= max_k {

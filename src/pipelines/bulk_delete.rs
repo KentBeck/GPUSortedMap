@@ -123,7 +123,7 @@ impl BulkDeletePipeline {
                 label: Some("bulk-delete-encoder"),
             });
 
-        let workgroups = ((keys.len() as u32) + 63) / 64;
+        let workgroups = (keys.len() as u32).div_ceil(64);
         self.step.dispatch(
             &mut encoder,
             "bulk-delete-pass",
