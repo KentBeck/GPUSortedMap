@@ -1,5 +1,29 @@
 //! GPU-accelerated sorted key/value store built on wgpu.
 //!
+//! `gpusorted_map` is a high-performance key-value store that leverages GPU compute shaders
+//! to accelerate batch operations. It's designed for workloads where you need to perform
+//! bulk lookups, inserts, or range queries on large datasets.
+//!
+//! # Features
+//!
+//! - **GPU-accelerated batch operations**: Leverage compute shaders for high throughput
+//! - **Sorted array structure**: Efficient binary search and range queries
+//! - **Cross-platform**: Supports Metal (macOS), Vulkan (Linux), and D3D12 (Windows)
+//! - **Type-safe API**: Strong newtype wrappers prevent mixing keys, values, and sizes
+//! - **Zero-copy operations**: Direct GPU memory access where possible
+//!
+//! # Performance Characteristics
+//!
+//! This data structure excels at:
+//! - Batch operations (bulk_put, bulk_get) with >1000 items
+//! - Range scans over sorted data
+//! - Scenarios where PCIe transfer latency can be amortized over many operations
+//!
+//! It may not be optimal for:
+//! - Single-key operations (use a CPU-based map instead)
+//! - Very small datasets (<1000 items)
+//! - Workloads requiring frequent updates with small batches
+//!
 //! # Quick start
 //!
 //! ```rust,no_run
@@ -15,6 +39,92 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! # Batch Operations Example
+//!
+//! ```rust
+//! use gpusorted_map::{Capacity, GpuSortedMap, Key, KvEntry, Value};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(10000)))?;
+//!
+//! // Prepare a large batch for efficient GPU processing
+//! let entries: Vec<KvEntry> = (0..5000)
+//!     .map(|i| KvEntry {
+//!         key: Key::new(i),
+//!         value: Value::new(i * 10)
+//!     })
+//!     .collect();
+//!
+//! // Single GPU operation handles all entries
+//! map.bulk_put(&entries)?;
+//!
+//! // Efficient batch lookup
+//! let keys: Vec<Key> = vec![Key::new(0), Key::new(100), Key::new(1000)];
+//! let values = map.bulk_get(&keys);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Range Queries Example
+//!
+//! ```rust
+//! use gpusorted_map::{Capacity, GpuSortedMap, Key, KvEntry, Value};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(1024)))?;
+//! map.bulk_put(&[
+//!     KvEntry { key: Key::new(10), value: Value::new(100) },
+//!     KvEntry { key: Key::new(20), value: Value::new(200) },
+//!     KvEntry { key: Key::new(30), value: Value::new(300) },
+//! ])?;
+//!
+//! // Half-open range [10, 30) - includes 10 and 20, but not 30
+//! let entries = map.range(Key::new(10), Key::new(30));
+//! assert_eq!(entries.len(), 2);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Error Handling
+//!
+//! Operations that can fail return [`Result<T, GpuMapError>`](GpuMapError):
+//!
+//! ```rust
+//! use gpusorted_map::{Capacity, GpuSortedMap, Key, KvEntry, Value, GpuMapError};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new(10)))?;
+//!
+//! let entries: Vec<KvEntry> = (0..20)
+//!     .map(|i| KvEntry { key: Key::new(i), value: Value::new(i) })
+//!     .collect();
+//!
+//! match map.bulk_put(&entries) {
+//!     Err(GpuMapError::CapacityExceeded { capacity, requested }) => {
+//!         println!("Need capacity {}, but only have {}", requested.0, capacity.0);
+//!     }
+//!     Ok(_) => unreachable!(),
+//!     _ => {}
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Reserved Values
+//!
+//! The value `0xFFFF_FFFF` is reserved as a tombstone marker for deleted entries.
+//! Attempting to insert this value will return [`GpuMapError::TombstoneValueReserved`].
+//!
+//! # GPU Requirements
+//!
+//! Requires a GPU backend supported by wgpu:
+//! - **macOS**: Metal
+//! - **Linux**: Vulkan
+//! - **Windows**: DirectX 12 or Vulkan
+//!
+//! If no GPU is available, wgpu will attempt to use a CPU-based software adapter
+//! (if available in your environment).
 
 mod gpu_array;
 mod pipelines;
