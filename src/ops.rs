@@ -21,6 +21,444 @@ struct RadixParams {
 
 const SCAN_BLOCK_SIZE: u32 = 256;
 
+pub(crate) const BULK_GET_WGSL: &str = r#"
+struct KvEntry {
+    key: u32,
+    value: u32,
+};
+
+struct SlabMeta {
+    len: u32,
+    capacity: u32,
+    _pad0: u32,
+    _pad1: u32,
+};
+
+struct KeysMeta {
+    len: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+};
+
+struct ResultEntry {
+    value: u32,
+    found: u32,
+    _pad0: u32,
+    _pad1: u32,
+};
+
+@group(0) @binding(0) var<storage, read> slab: array<KvEntry>;
+@group(0) @binding(1) var<storage, read> slab_meta: SlabMeta;
+@group(0) @binding(2) var<storage, read> keys: array<u32>;
+@group(0) @binding(3) var<uniform> keys_meta: KeysMeta;
+@group(0) @binding(4) var<storage, read_write> results: array<ResultEntry>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if (idx >= keys_meta.len) {
+        return;
+    }
+
+    let key = keys[idx];
+    var lo: u32 = 0u;
+    var hi: u32 = slab_meta.len;
+    while (lo < hi) {
+        let mid = (lo + hi) / 2u;
+        let mid_key = slab[mid].key;
+        if (mid_key < key) {
+            lo = mid + 1u;
+        } else {
+            hi = mid;
+        }
+    }
+
+    if (lo < slab_meta.len && slab[lo].key == key) {
+        let value = slab[lo].value;
+        if (value == 0xffffffffu) {
+            results[idx].value = 0u;
+            results[idx].found = 0u;
+        } else {
+            results[idx].value = value;
+            results[idx].found = 1u;
+        }
+    } else {
+        results[idx].value = 0u;
+        results[idx].found = 0u;
+    }
+}
+"#;
+
+pub(crate) const BULK_MERGE_WGSL: &str = r#"
+struct KvEntry {
+    key: u32,
+    value: u32,
+};
+
+struct SlabMeta {
+    len: u32,
+    capacity: u32,
+    _pad0: u32,
+    _pad1: u32,
+};
+
+struct InputMeta {
+    len: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+};
+
+struct MergeMeta {
+    len: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+};
+
+@group(0) @binding(0) var<storage, read> slab: array<KvEntry>;
+@group(0) @binding(1) var<storage, read> input: array<KvEntry>;
+@group(0) @binding(2) var<storage, read_write> output: array<KvEntry>;
+@group(0) @binding(3) var<storage, read> slab_meta: SlabMeta;
+@group(0) @binding(4) var<storage, read> input_meta: InputMeta;
+@group(0) @binding(5) var<storage, read_write> merge_meta: MergeMeta;
+
+fn merge_partition(k: u32, slab_len: u32, input_len: u32) -> vec2<u32> {
+    var i_low: u32 = 0u;
+    if (k > input_len) {
+        i_low = k - input_len;
+    }
+    var i_high: u32 = k;
+    if (i_high > slab_len) {
+        i_high = slab_len;
+    }
+
+    var i: u32 = i_high;
+    var j: u32 = k - i;
+    loop {
+        let move_left = i > 0u && j < input_len && slab[i - 1u].key >= input[j].key;
+        let move_right = j > 0u && i < slab_len && input[j - 1u].key > slab[i].key;
+        if (move_left) {
+            i_high = i - 1u;
+            i = (i_low + i_high) / 2u;
+            j = k - i;
+            continue;
+        }
+        if (move_right) {
+            i_low = i + 1u;
+            i = (i_low + i_high + 1u) / 2u;
+            j = k - i;
+            continue;
+        }
+        break;
+    }
+    return vec2<u32>(i, j);
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let slab_len = slab_meta.len;
+    let input_len = input_meta.len;
+    let total_len = slab_len + input_len;
+    if (total_len == 0u) {
+        if (gid.x == 0u) {
+            merge_meta.len = 0u;
+        }
+        return;
+    }
+
+    let chunk_size: u32 = 256u;
+    let chunk_count = (total_len + chunk_size - 1u) / chunk_size;
+    let chunk_index = gid.x;
+    if (chunk_index >= chunk_count) {
+        return;
+    }
+
+    let k0 = chunk_index * chunk_size;
+    var k1 = k0 + chunk_size;
+    if (k1 > total_len) {
+        k1 = total_len;
+    }
+
+    let start = merge_partition(k0, slab_len, input_len);
+    let end = merge_partition(k1, slab_len, input_len);
+
+    var i = start.x;
+    var j = start.y;
+    var k = k0;
+
+    while (k < k1) {
+        if (i < end.x && j < end.y) {
+            let a = slab[i];
+            let b = input[j];
+            if (a.key < b.key) {
+                output[k] = a;
+                i = i + 1u;
+            } else {
+                output[k] = b;
+                j = j + 1u;
+            }
+        } else if (i < end.x) {
+            output[k] = slab[i];
+            i = i + 1u;
+        } else {
+            output[k] = input[j];
+            j = j + 1u;
+        }
+        k = k + 1u;
+    }
+
+    if (chunk_index == 0u) {
+        merge_meta.len = total_len;
+    }
+}
+"#;
+
+pub(crate) const RADIX_SORT_WGSL: &str = r#"
+struct KvEntry {
+    key: u32,
+    value: u32,
+};
+
+struct RadixParams {
+    len: u32,
+    bit: u32,
+    _pad0: u32,
+    _pad1: u32,
+};
+
+@group(0) @binding(0) var<storage, read> input_entries: array<KvEntry>;
+@group(0) @binding(1) var<storage, read_write> output_entries: array<KvEntry>;
+@group(0) @binding(2) var<storage, read_write> flags: array<u32>;
+@group(0) @binding(3) var<storage, read> prefix: array<u32>;
+@group(0) @binding(4) var<storage, read> zero_count: array<u32>;
+@group(0) @binding(5) var<uniform> params: RadixParams;
+
+@compute @workgroup_size(256)
+fn radix_flags(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if (idx >= params.len) {
+        return;
+    }
+    let key = input_entries[idx].key;
+    let bit = (key >> params.bit) & 1u;
+    flags[idx] = select(1u, 0u, bit == 1u);
+}
+
+@compute @workgroup_size(256)
+fn radix_scatter(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if (idx >= params.len) {
+        return;
+    }
+    let zero_total = zero_count[0];
+    let zero_flag = flags[idx];
+    let pos = select(zero_total + (idx - prefix[idx]), prefix[idx], zero_flag == 1u);
+    output_entries[pos] = input_entries[idx];
+}
+"#;
+
+pub(crate) const SCAN_WGSL: &str = r#"
+struct ScanParams {
+    len: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+};
+
+@group(0) @binding(0) var<storage, read> input_values: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output_values: array<u32>;
+@group(0) @binding(2) var<storage, read_write> block_sums: array<u32>;
+@group(0) @binding(3) var<storage, read> scanned_block_sums: array<u32>;
+@group(0) @binding(4) var<uniform> params: ScanParams;
+
+var<workgroup> temp: array<u32, 256>;
+
+@compute @workgroup_size(256)
+fn scan_block(@builtin(local_invocation_id) lid: vec3<u32>,
+              @builtin(global_invocation_id) gid: vec3<u32>,
+              @builtin(workgroup_id) wid: vec3<u32>) {
+    let idx = gid.x;
+    let local_idx = lid.x;
+    var value: u32 = 0u;
+    if (idx < params.len) {
+        value = input_values[idx];
+    }
+    temp[local_idx] = value;
+    workgroupBarrier();
+
+    var offset: u32 = 1u;
+    for (var d: u32 = 128u; d > 0u; d = d >> 1u) {
+        workgroupBarrier();
+        if (local_idx < d) {
+            let ai = offset * (2u * local_idx + 1u) - 1u;
+            let bi = offset * (2u * local_idx + 2u) - 1u;
+            temp[bi] = temp[bi] + temp[ai];
+        }
+        offset = offset << 1u;
+    }
+
+    if (local_idx == 0u) {
+        block_sums[wid.x] = temp[255];
+        temp[255] = 0u;
+    }
+    workgroupBarrier();
+
+    for (var d: u32 = 1u; d <= 128u; d = d << 1u) {
+        offset = offset >> 1u;
+        workgroupBarrier();
+        if (local_idx < d) {
+            let ai = offset * (2u * local_idx + 1u) - 1u;
+            let bi = offset * (2u * local_idx + 2u) - 1u;
+            let t = temp[ai];
+            temp[ai] = temp[bi];
+            temp[bi] = temp[bi] + t;
+        }
+    }
+    workgroupBarrier();
+
+    if (idx < params.len) {
+        output_values[idx] = temp[local_idx];
+    }
+}
+
+@compute @workgroup_size(256)
+fn scan_add(@builtin(global_invocation_id) gid: vec3<u32>,
+            @builtin(workgroup_id) wid: vec3<u32>) {
+    let idx = gid.x;
+    if (idx >= params.len) {
+        return;
+    }
+    if (wid.x == 0u) {
+        return;
+    }
+    output_values[idx] = output_values[idx] + scanned_block_sums[wid.x];
+}
+"#;
+
+pub(crate) const DEDUP_WGSL: &str = r#"
+struct KvEntry {
+    key: u32,
+    value: u32,
+};
+
+struct ScanParams {
+    len: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+};
+
+@group(0) @binding(0) var<storage, read> input_entries: array<KvEntry>;
+@group(0) @binding(1) var<storage, read_write> output_entries: array<KvEntry>;
+@group(0) @binding(2) var<storage, read_write> flags: array<u32>;
+@group(0) @binding(3) var<storage, read> prefix: array<u32>;
+@group(0) @binding(4) var<uniform> params: ScanParams;
+
+@compute @workgroup_size(256)
+fn dedup_flags(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if (idx >= params.len) {
+        return;
+    }
+    let is_last = idx + 1u >= params.len;
+    var keep: bool = is_last;
+    if (!is_last) {
+        keep = input_entries[idx].key != input_entries[idx + 1u].key;
+    }
+    flags[idx] = select(0u, 1u, keep);
+}
+
+@compute @workgroup_size(256)
+fn dedup_compact(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if (idx >= params.len) {
+        return;
+    }
+    if (flags[idx] == 1u) {
+        let out_idx = prefix[idx];
+        output_entries[out_idx] = input_entries[idx];
+    }
+}
+"#;
+
+pub(crate) const COUNT_WGSL: &str = r#"
+struct ScanParams {
+    len: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+};
+
+struct InputMeta {
+    len: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+};
+
+@group(0) @binding(0) var<storage, read> flags: array<u32>;
+@group(0) @binding(1) var<storage, read> prefix: array<u32>;
+@group(0) @binding(2) var<storage, read_write> count: array<u32>;
+@group(0) @binding(3) var<storage, read_write> input_meta: InputMeta;
+@group(0) @binding(4) var<uniform> params: ScanParams;
+
+@compute @workgroup_size(1)
+fn total_count() {
+    if (params.len == 0u) {
+        count[0] = 0u;
+        return;
+    }
+    let last = params.len - 1u;
+    count[0] = prefix[last] + flags[last];
+}
+
+@compute @workgroup_size(1)
+fn write_input_meta() {
+    input_meta.len = count[0];
+}
+"#;
+
+pub(crate) const META_WGSL: &str = r#"
+struct SlabMeta {
+    len: u32,
+    capacity: u32,
+    _pad0: u32,
+    _pad1: u32,
+};
+
+struct InputMeta {
+    len: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+};
+
+struct MergeMeta {
+    len: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+};
+
+@group(0) @binding(0) var<storage, read_write> slab_meta: SlabMeta;
+@group(0) @binding(1) var<storage, read> input_meta: InputMeta;
+@group(0) @binding(2) var<storage, read> merge_meta: MergeMeta;
+@group(0) @binding(3) var<storage, read_write> error: array<u32>;
+
+@compute @workgroup_size(1)
+fn capacity_check() {
+    let requested = slab_meta.len + input_meta.len;
+    error[0] = select(0u, 1u, requested > slab_meta.capacity);
+}
+
+@compute @workgroup_size(1)
+fn write_slab_meta() {
+    slab_meta.len = merge_meta.len;
+}
+"#;
+
 pub(crate) struct ScanLevel {
     pub(crate) block_sums: wgpu::Buffer,
     pub(crate) scanned_block_sums: wgpu::Buffer,
