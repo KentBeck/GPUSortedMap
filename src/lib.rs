@@ -60,6 +60,8 @@ pub struct GpuSortedMap {
     len: u32,
 }
 
+const TOMBSTONE_VALUE: u32 = u32::MAX;
+
 impl GpuSortedMap {
     pub async fn new(capacity: u32) -> Result<Self, wgpu::RequestDeviceError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -551,6 +553,25 @@ impl GpuSortedMap {
     pub fn get(&self, key: u32) -> Option<u32> {
         self.bulk_get(&[key]).into_iter().next().unwrap_or(None)
     }
+
+    pub fn bulk_delete(&mut self, keys: &[u32]) -> Result<(), GpuMapError> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+
+        let entries: Vec<KvEntry> = keys
+            .iter()
+            .map(|&key| KvEntry {
+                key,
+                value: TOMBSTONE_VALUE,
+            })
+            .collect();
+        self.bulk_put(&entries)
+    }
+
+    pub fn delete(&mut self, key: u32) -> Result<(), GpuMapError> {
+        self.bulk_delete(&[key])
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -612,8 +633,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     if (lo < slab_meta.len && slab[lo].key == key) {
-        results[idx].value = slab[lo].value;
-        results[idx].found = 1u;
+        let value = slab[lo].value;
+        if (value == 0xffffffffu) {
+            results[idx].value = 0u;
+            results[idx].found = 0u;
+        } else {
+            results[idx].value = value;
+            results[idx].found = 1u;
+        }
     } else {
         results[idx].value = 0u;
         results[idx].found = 0u;
@@ -833,5 +860,52 @@ mod tests {
     fn single_get_missing_key() {
         let map = pollster::block_on(GpuSortedMap::new(4)).unwrap();
         assert_eq!(map.get(9), None);
+    }
+
+    #[test]
+    fn delete_existing_key() {
+        let mut map = pollster::block_on(GpuSortedMap::new(8)).unwrap();
+        let entries = [
+            KvEntry { key: 1, value: 10 },
+            KvEntry { key: 2, value: 20 },
+        ];
+        map.bulk_put(&entries).unwrap();
+
+        map.delete(1).unwrap();
+        assert_eq!(map.get(1), None);
+        assert_eq!(map.get(2), Some(20));
+    }
+
+    #[test]
+    fn bulk_delete_mixed_keys() {
+        let mut map = pollster::block_on(GpuSortedMap::new(8)).unwrap();
+        let entries = [
+            KvEntry { key: 5, value: 50 },
+            KvEntry { key: 7, value: 70 },
+            KvEntry { key: 9, value: 90 },
+        ];
+        map.bulk_put(&entries).unwrap();
+
+        map.bulk_delete(&[7, 7, 99]).unwrap();
+        let results = map.bulk_get(&[5, 7, 9, 99]);
+        assert_eq!(results, vec![Some(50), None, Some(90), None]);
+    }
+
+    #[test]
+    fn delete_then_put_restores_value() {
+        let mut map = pollster::block_on(GpuSortedMap::new(8)).unwrap();
+        map.put(3, 30).unwrap();
+        map.delete(3).unwrap();
+        assert_eq!(map.get(3), None);
+
+        map.put(3, 31).unwrap();
+        assert_eq!(map.get(3), Some(31));
+    }
+
+    #[test]
+    fn bulk_delete_empty_is_noop() {
+        let mut map = pollster::block_on(GpuSortedMap::new(4)).unwrap();
+        map.bulk_delete(&[]).unwrap();
+        assert_eq!(map.get(1), None);
     }
 }
