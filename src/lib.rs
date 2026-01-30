@@ -62,6 +62,247 @@ pub struct GpuSortedMap {
 
 const TOMBSTONE_VALUE: u32 = u32::MAX;
 
+struct BulkPutOp {
+    incoming: Vec<KvEntry>,
+}
+
+impl BulkPutOp {
+    fn new(map: &GpuSortedMap, entries: &[KvEntry]) -> Result<Self, GpuMapError> {
+        // TODO: Decide whether bulk_put should accept duplicate keys (e.g., last-write-wins).
+        let mut incoming_map = std::collections::BTreeMap::new();
+        for entry in entries {
+            incoming_map.insert(entry.key, entry.value);
+        }
+        let incoming: Vec<KvEntry> = incoming_map
+            .into_iter()
+            .map(|(key, value)| KvEntry { key, value })
+            .collect();
+
+        let requested = map.len + incoming.len() as u32;
+        if requested > map.capacity {
+            return Err(GpuMapError::CapacityExceeded {
+                capacity: map.capacity,
+                requested,
+            });
+        }
+
+        Ok(Self { incoming })
+    }
+
+    fn execute(self, map: &mut GpuSortedMap) -> Result<(), GpuMapError> {
+        if !self.incoming.is_empty() {
+            map.queue.write_buffer(
+                &map.input_buffer,
+                0,
+                bytemuck::cast_slice(&self.incoming),
+            );
+        }
+        let input_meta = InputMeta {
+            len: self.incoming.len() as u32,
+            _pad: [0; 3],
+        };
+        let input_meta_buffer =
+            create_uniform_buffer(&map.device, "input-meta-buffer", &input_meta);
+
+        let merge_bind_group = map.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bulk-merge-bind-group"),
+            layout: &map.bulk_merge_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: map.slab_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: map.input_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: map.merge_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: map.meta_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: input_meta_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: map.merge_meta_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let merge_readback = map.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("merge-meta-readback"),
+            size: std::mem::size_of::<MergeMeta>() as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = map
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("bulk-merge-encoder"),
+            });
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("bulk-merge-pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&map.bulk_merge_pipeline);
+            cpass.set_bind_group(0, &merge_bind_group, &[]);
+            cpass.dispatch_workgroups(1, 1, 1);
+        }
+        let slab_bytes = (map.capacity as u64) * std::mem::size_of::<KvEntry>() as u64;
+        encoder.copy_buffer_to_buffer(&map.merge_buffer, 0, &map.slab_buffer, 0, slab_bytes);
+        encoder.copy_buffer_to_buffer(
+            &map.merge_meta_buffer,
+            0,
+            &merge_readback,
+            0,
+            std::mem::size_of::<MergeMeta>() as u64,
+        );
+        map.queue.submit(Some(encoder.finish()));
+
+        let merge_len = readback_merge_len(&map.device, &merge_readback);
+        map.update_len(merge_len);
+        Ok(())
+    }
+}
+
+struct BulkGetOp {
+    keys_len: usize,
+    _keys_buffer: wgpu::Buffer,
+    _keys_meta_buffer: wgpu::Buffer,
+    results_buffer: wgpu::Buffer,
+    readback_buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    workgroups: u32,
+}
+
+impl BulkGetOp {
+    fn new(map: &GpuSortedMap, keys: &[u32]) -> Self {
+        let keys_len = keys.len();
+        let keys_buffer = create_buffer_with_data(
+            &map.device,
+            "keys-buffer",
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            keys,
+        );
+        let results_buffer = map.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("results-buffer"),
+            size: (keys_len * std::mem::size_of::<ResultEntry>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let readback_buffer = map.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("results-readback-buffer"),
+            size: (keys_len * std::mem::size_of::<ResultEntry>()) as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let keys_meta = KeysMeta {
+            len: keys_len as u32,
+            _pad: [0; 3],
+        };
+        let keys_meta_buffer = create_uniform_buffer(&map.device, "keys-meta-buffer", &keys_meta);
+
+        let bind_group = map.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bulk-get-bind-group"),
+            layout: &map.bulk_get_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: map.slab_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: map.meta_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: keys_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: keys_meta_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: results_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let workgroups = ((keys_len as u32) + 63) / 64;
+
+        Self {
+            keys_len,
+            _keys_buffer: keys_buffer,
+            _keys_meta_buffer: keys_meta_buffer,
+            results_buffer,
+            readback_buffer,
+            bind_group,
+            workgroups,
+        }
+    }
+
+    fn execute(self, map: &GpuSortedMap) -> Vec<Option<u32>> {
+        let mut encoder = map
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("bulk-get-encoder"),
+            });
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("bulk-get-pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&map.bulk_get_pipeline);
+            cpass.set_bind_group(0, &self.bind_group, &[]);
+            cpass.dispatch_workgroups(self.workgroups, 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(
+            &self.results_buffer,
+            0,
+            &self.readback_buffer,
+            0,
+            (self.keys_len * std::mem::size_of::<ResultEntry>()) as u64,
+        );
+        map.queue.submit(Some(encoder.finish()));
+
+        let result_entries = readback_results(&map.device, &self.readback_buffer);
+        result_entries
+            .iter()
+            .map(|entry| if entry.found == 0 { None } else { Some(entry.value) })
+            .collect()
+    }
+}
+
+struct BulkDeleteOp {
+    entries: Vec<KvEntry>,
+}
+
+impl BulkDeleteOp {
+    fn new(keys: &[u32]) -> Self {
+        let entries = keys
+            .iter()
+            .map(|&key| KvEntry {
+                key,
+                value: TOMBSTONE_VALUE,
+            })
+            .collect();
+        Self { entries }
+    }
+
+    fn execute(self, map: &mut GpuSortedMap) -> Result<(), GpuMapError> {
+        BulkPutOp::new(map, &self.entries)?.execute(map)
+    }
+}
+
 impl GpuSortedMap {
     pub async fn new(capacity: u32) -> Result<Self, wgpu::RequestDeviceError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -339,210 +580,14 @@ impl GpuSortedMap {
             return Ok(());
         }
 
-        // TODO: Decide whether bulk_put should accept duplicate keys (e.g., last-write-wins).
-        let mut incoming_map = std::collections::BTreeMap::new();
-        for entry in entries {
-            incoming_map.insert(entry.key, entry.value);
-        }
-        let incoming: Vec<KvEntry> = incoming_map
-            .into_iter()
-            .map(|(key, value)| KvEntry { key, value })
-            .collect();
-
-        let requested = self.len + incoming.len() as u32;
-        if requested > self.capacity {
-            return Err(GpuMapError::CapacityExceeded {
-                capacity: self.capacity,
-                requested,
-            });
-        }
-
-        if !incoming.is_empty() {
-            self.queue.write_buffer(
-                &self.input_buffer,
-                0,
-                bytemuck::cast_slice(&incoming),
-            );
-        }
-        let input_meta = InputMeta {
-            len: incoming.len() as u32,
-            _pad: [0; 3],
-        };
-        let input_meta_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("input-meta-buffer"),
-            size: std::mem::size_of::<InputMeta>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: true,
-        });
-        {
-            let mut view = input_meta_buffer.slice(..).get_mapped_range_mut();
-            view.copy_from_slice(bytemuck::bytes_of(&input_meta));
-        }
-        input_meta_buffer.unmap();
-
-        let merge_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bulk-merge-bind-group"),
-            layout: &self.bulk_merge_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.slab_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: self.input_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.merge_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: self.meta_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: input_meta_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: self.merge_meta_buffer.as_entire_binding(),
-                },
-            ],
-        });
-
-        let merge_readback = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("merge-meta-readback"),
-            size: std::mem::size_of::<MergeMeta>() as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
-        let mut encoder =
-            self.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("bulk-merge-encoder"),
-                });
-        {
-            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("bulk-merge-pass"),
-                timestamp_writes: None,
-            });
-            cpass.set_pipeline(&self.bulk_merge_pipeline);
-            cpass.set_bind_group(0, &merge_bind_group, &[]);
-            cpass.dispatch_workgroups(1, 1, 1);
-        }
-        let slab_bytes = (self.capacity as u64) * std::mem::size_of::<KvEntry>() as u64;
-        encoder.copy_buffer_to_buffer(&self.merge_buffer, 0, &self.slab_buffer, 0, slab_bytes);
-        encoder.copy_buffer_to_buffer(
-            &self.merge_meta_buffer,
-            0,
-            &merge_readback,
-            0,
-            std::mem::size_of::<MergeMeta>() as u64,
-        );
-        self.queue.submit(Some(encoder.finish()));
-
-        let merge_len = readback_merge_len(&self.device, &merge_readback);
-        self.update_len(merge_len);
-        Ok(())
+        BulkPutOp::new(self, entries)?.execute(self)
     }
 
     pub fn bulk_get(&self, keys: &[u32]) -> Vec<Option<u32>> {
         if keys.is_empty() {
             return Vec::new();
         }
-
-        let keys_buffer = create_buffer_with_data(
-            &self.device,
-            "keys-buffer",
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            keys,
-        );
-        let results_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("results-buffer"),
-            size: (keys.len() * std::mem::size_of::<ResultEntry>()) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        let readback_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("results-readback-buffer"),
-            size: (keys.len() * std::mem::size_of::<ResultEntry>()) as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let keys_meta = KeysMeta {
-            len: keys.len() as u32,
-            _pad: [0; 3],
-        };
-        let keys_meta_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("keys-meta-buffer"),
-            size: std::mem::size_of::<KeysMeta>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: true,
-        });
-        {
-            let mut view = keys_meta_buffer.slice(..).get_mapped_range_mut();
-            view.copy_from_slice(bytemuck::bytes_of(&keys_meta));
-        }
-        keys_meta_buffer.unmap();
-
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bulk-get-bind-group"),
-            layout: &self.bulk_get_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.slab_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: self.meta_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: keys_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: keys_meta_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: results_buffer.as_entire_binding(),
-                },
-            ],
-        });
-
-        let mut encoder =
-            self.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("bulk-get-encoder"),
-                });
-        {
-            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("bulk-get-pass"),
-                timestamp_writes: None,
-            });
-            cpass.set_pipeline(&self.bulk_get_pipeline);
-            cpass.set_bind_group(0, &bind_group, &[]);
-            let workgroups = ((keys.len() as u32) + 63) / 64;
-            cpass.dispatch_workgroups(workgroups, 1, 1);
-        }
-        encoder.copy_buffer_to_buffer(
-            &results_buffer,
-            0,
-            &readback_buffer,
-            0,
-            (keys.len() * std::mem::size_of::<ResultEntry>()) as u64,
-        );
-        self.queue.submit(Some(encoder.finish()));
-
-        let result_entries = readback_results(&self.device, &readback_buffer);
-        result_entries
-            .iter()
-            .map(|entry| if entry.found == 0 { None } else { Some(entry.value) })
-            .collect()
+        BulkGetOp::new(self, keys).execute(self)
     }
 
     pub fn put(&mut self, key: u32, value: u32) -> Result<(), GpuMapError> {
@@ -558,15 +603,7 @@ impl GpuSortedMap {
         if keys.is_empty() {
             return Ok(());
         }
-
-        let entries: Vec<KvEntry> = keys
-            .iter()
-            .map(|&key| KvEntry {
-                key,
-                value: TOMBSTONE_VALUE,
-            })
-            .collect();
-        self.bulk_put(&entries)
+        BulkDeleteOp::new(keys).execute(self)
     }
 
     pub fn delete(&mut self, key: u32) -> Result<(), GpuMapError> {
@@ -789,6 +826,21 @@ fn create_buffer_with_data<T: Pod>(
     if !data.is_empty() {
         let mut view = buffer.slice(..).get_mapped_range_mut();
         view.copy_from_slice(bytemuck::cast_slice(data));
+    }
+    buffer.unmap();
+    buffer
+}
+
+fn create_uniform_buffer<T: Pod>(device: &wgpu::Device, label: &str, value: &T) -> wgpu::Buffer {
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: std::mem::size_of::<T>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: true,
+    });
+    {
+        let mut view = buffer.slice(..).get_mapped_range_mut();
+        view.copy_from_slice(bytemuck::bytes_of(value));
     }
     buffer.unmap();
     buffer
