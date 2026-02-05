@@ -34,6 +34,8 @@ fn main() {
         ));
     }
 
+    let max_size = find_max_gpu_size(1_000_000, 2, &mut rng);
+
     let commit = git_head().unwrap_or_else(|| "unknown".to_string());
     let stamp = unix_timestamp();
     let dir = PathBuf::from("perf");
@@ -64,7 +66,13 @@ fn main() {
         .expect("failed to write row");
     }
 
+    let max_filename = format!("{commit}_{stamp}_max.txt");
+    let max_path = dir.join(max_filename);
+    let mut max_file = File::create(&max_path).expect("failed to create max output file");
+    writeln!(max_file, "max_gpu_size={}", max_size).expect("failed to write max size");
+
     println!("wrote perf results to {}", path.display());
+    println!("max gpu size: {} (see {})", max_size, max_path.display());
 }
 
 fn bench_btree(keys: &[u32]) -> (Duration, Duration) {
@@ -98,6 +106,40 @@ fn bench_gpu(entries: &[KvEntry], keys: &[u32]) -> (Duration, Duration) {
     let values = map.bulk_get(keys);
     std::hint::black_box(values);
     (put, start.elapsed())
+}
+
+fn find_max_gpu_size(start: usize, growth_factor: usize, rng: &mut StdRng) -> usize {
+    let mut current = start.max(1);
+    let mut last_ok = 0;
+    loop {
+        if current > (u32::MAX as usize) / 2 {
+            return last_ok;
+        }
+        let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let keys: Vec<u32> = (0..current).map(|_| rng.next_u32()).collect();
+            let entries: Vec<KvEntry> = keys
+                .iter()
+                .map(|&key| KvEntry {
+                    key,
+                    value: key.wrapping_mul(31),
+                })
+                .collect();
+
+            let mut map =
+                pollster::block_on(GpuSortedMap::new((entries.len() * 2) as u32))
+                    .map_err(|_| ())?;
+            map.bulk_put(&entries).map_err(|_| ())?;
+            Ok::<(), ()>(())
+        }))
+        .is_ok();
+
+        if ok {
+            last_ok = current;
+            current = current.saturating_mul(growth_factor);
+        } else {
+            return last_ok;
+        }
+    }
 }
 
 fn git_head() -> Option<String> {
