@@ -1124,7 +1124,10 @@ mod tests {
 
         let entries = map.range(k(1), k(7));
         let pairs: Vec<(Key, Value)> = entries.iter().map(|e| (e.key, e.value)).collect();
-        assert_eq!(pairs, vec![(k(1), v(10)), (k(3), v(30)), (k(5), v(50)), (k(6), v(60))]);
+        assert_eq!(
+            pairs,
+            vec![(k(1), v(10)), (k(3), v(30)), (k(5), v(50)), (k(6), v(60))]
+        );
     }
 
     #[test]
