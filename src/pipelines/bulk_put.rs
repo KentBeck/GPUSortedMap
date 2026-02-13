@@ -606,23 +606,30 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let a = slab[i];
         let b = input[j];
         if (a.key < b.key) {
-            output[k] = a;
+            if (a.value != 0xffffffffu) {
+                output[k] = a;
+                k = k + 1u;
+            }
             i = i + 1u;
         } else if (b.key < a.key) {
             output[k] = b;
             j = j + 1u;
+            k = k + 1u;
         } else {
             output[k] = b;
             i = i + 1u;
             j = j + 1u;
+            k = k + 1u;
         }
-        k = k + 1u;
     }
 
     while (i < slab_len) {
-        output[k] = slab[i];
+        let a = slab[i];
+        if (a.value != 0xffffffffu) {
+            output[k] = a;
+            k = k + 1u;
+        }
         i = i + 1u;
-        k = k + 1u;
     }
 
     while (j < input_len) {

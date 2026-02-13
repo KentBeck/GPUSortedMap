@@ -377,7 +377,7 @@ impl GpuSortedMap {
             unique_keys_from_entries(entries).map_err(|key| GpuMapError::DuplicateKeys { key })?;
         let existing = self.count_existing_keys(&unique_keys);
         let net_new = unique_keys.len().saturating_sub(existing) as u32;
-        let requested = Length::new(self.slab.len().0 + net_new);
+        let requested = Length::new(self.live_len.0 + net_new);
         if requested.0 > self.slab.capacity().0 {
             return Err(GpuMapError::CapacityExceeded {
                 capacity: self.slab.capacity(),
@@ -923,6 +923,277 @@ mod tests {
         map.bulk_delete(&[k(1), k(2)]);
         assert_eq!(map.len(), Length::new(0));
         assert!(map.is_empty());
+    }
+
+    #[test]
+    fn put_compacts_tombstones_and_preserves_live_data() {
+        skip_if_no_gpu!(mut map, Capacity::new(16));
+        map.bulk_put(&[
+            KvEntry {
+                key: k(1),
+                value: v(10),
+            },
+            KvEntry {
+                key: k(2),
+                value: v(20),
+            },
+            KvEntry {
+                key: k(3),
+                value: v(30),
+            },
+            KvEntry {
+                key: k(4),
+                value: v(40),
+            },
+            KvEntry {
+                key: k(5),
+                value: v(50),
+            },
+        ])
+        .unwrap();
+
+        map.bulk_delete(&[k(2), k(4)]);
+        map.bulk_put(&[KvEntry {
+            key: k(6),
+            value: v(60),
+        }])
+        .unwrap();
+
+        assert_eq!(map.get(k(1)), Some(v(10)));
+        assert_eq!(map.get(k(2)), None);
+        assert_eq!(map.get(k(3)), Some(v(30)));
+        assert_eq!(map.get(k(4)), None);
+        assert_eq!(map.get(k(5)), Some(v(50)));
+        assert_eq!(map.get(k(6)), Some(v(60)));
+
+        let entries = map.range(k(1), k(7));
+        let keys: Vec<Key> = entries.iter().map(|entry| entry.key).collect();
+        assert_eq!(keys, vec![k(1), k(3), k(5), k(6)]);
+        assert_eq!(map.len(), Length::new(4));
+    }
+
+    #[test]
+    fn put_revives_deleted_key_instead_of_creating_duplicate() {
+        skip_if_no_gpu!(mut map, Capacity::new(8));
+        map.put(k(42), v(1)).unwrap();
+        map.delete(k(42));
+        map.put(k(42), v(2)).unwrap();
+
+        assert_eq!(map.get(k(42)), Some(v(2)));
+        let entries = map.range(k(42), k(43));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, k(42));
+        assert_eq!(entries[0].value, v(2));
+        assert_eq!(map.len(), Length::new(1));
+    }
+
+    #[test]
+    fn put_after_many_deletes_does_not_false_capacity_exceed() {
+        skip_if_no_gpu!(mut map, Capacity::new(8));
+        map.bulk_put(&[
+            KvEntry {
+                key: k(1),
+                value: v(1),
+            },
+            KvEntry {
+                key: k(2),
+                value: v(2),
+            },
+            KvEntry {
+                key: k(3),
+                value: v(3),
+            },
+            KvEntry {
+                key: k(4),
+                value: v(4),
+            },
+            KvEntry {
+                key: k(5),
+                value: v(5),
+            },
+            KvEntry {
+                key: k(6),
+                value: v(6),
+            },
+        ])
+        .unwrap();
+        map.bulk_delete(&[k(2), k(3), k(4), k(5), k(6)]);
+
+        let res = map.bulk_put(&[KvEntry {
+            key: k(100),
+            value: v(100),
+        }]);
+        assert!(res.is_ok());
+        assert_eq!(map.get(k(100)), Some(v(100)));
+        assert_eq!(map.len(), Length::new(2));
+    }
+
+    #[test]
+    fn put_with_no_new_entries_still_compacts() {
+        skip_if_no_gpu!(mut map, Capacity::new(8));
+        map.bulk_put(&[
+            KvEntry {
+                key: k(1),
+                value: v(10),
+            },
+            KvEntry {
+                key: k(2),
+                value: v(20),
+            },
+            KvEntry {
+                key: k(3),
+                value: v(30),
+            },
+            KvEntry {
+                key: k(4),
+                value: v(40),
+            },
+            KvEntry {
+                key: k(5),
+                value: v(50),
+            },
+            KvEntry {
+                key: k(6),
+                value: v(60),
+            },
+        ])
+        .unwrap();
+
+        map.bulk_delete(&[k(2), k(4), k(6)]);
+        map.bulk_put(&[
+            KvEntry {
+                key: k(1),
+                value: v(100),
+            },
+            KvEntry {
+                key: k(3),
+                value: v(300),
+            },
+            KvEntry {
+                key: k(5),
+                value: v(500),
+            },
+        ])
+        .unwrap();
+
+        let insert_after_compact = map.bulk_put(&[KvEntry {
+            key: k(7),
+            value: v(70),
+        }]);
+        assert!(insert_after_compact.is_ok());
+        assert_eq!(map.get(k(1)), Some(v(100)));
+        assert_eq!(map.get(k(3)), Some(v(300)));
+        assert_eq!(map.get(k(5)), Some(v(500)));
+        assert_eq!(map.get(k(7)), Some(v(70)));
+        assert_eq!(map.len(), Length::new(4));
+    }
+
+    #[test]
+    fn range_after_compacting_put_excludes_old_tombstoned_keys() {
+        skip_if_no_gpu!(mut map, Capacity::new(10));
+        map.bulk_put(&[
+            KvEntry {
+                key: k(1),
+                value: v(10),
+            },
+            KvEntry {
+                key: k(2),
+                value: v(20),
+            },
+            KvEntry {
+                key: k(3),
+                value: v(30),
+            },
+            KvEntry {
+                key: k(4),
+                value: v(40),
+            },
+            KvEntry {
+                key: k(5),
+                value: v(50),
+            },
+        ])
+        .unwrap();
+
+        map.bulk_delete(&[k(2), k(4)]);
+        map.bulk_put(&[KvEntry {
+            key: k(6),
+            value: v(60),
+        }])
+        .unwrap();
+
+        let entries = map.range(k(1), k(7));
+        let pairs: Vec<(Key, Value)> = entries.iter().map(|e| (e.key, e.value)).collect();
+        assert_eq!(pairs, vec![(k(1), v(10)), (k(3), v(30)), (k(5), v(50)), (k(6), v(60))]);
+    }
+
+    #[test]
+    fn bulk_delete_then_bulk_put_mixed_overlap_is_consistent() {
+        skip_if_no_gpu!(mut map, Capacity::new(12));
+        map.bulk_put(&[
+            KvEntry {
+                key: k(1),
+                value: v(10),
+            },
+            KvEntry {
+                key: k(2),
+                value: v(20),
+            },
+            KvEntry {
+                key: k(3),
+                value: v(30),
+            },
+            KvEntry {
+                key: k(4),
+                value: v(40),
+            },
+            KvEntry {
+                key: k(5),
+                value: v(50),
+            },
+            KvEntry {
+                key: k(6),
+                value: v(60),
+            },
+        ])
+        .unwrap();
+
+        map.bulk_delete(&[k(2), k(4), k(6)]);
+        map.bulk_put(&[
+            KvEntry {
+                key: k(2),
+                value: v(200),
+            },
+            KvEntry {
+                key: k(6),
+                value: v(600),
+            },
+            KvEntry {
+                key: k(7),
+                value: v(70),
+            },
+            KvEntry {
+                key: k(8),
+                value: v(80),
+            },
+        ])
+        .unwrap();
+
+        let entries = map.range(k(1), k(9));
+        let pairs: Vec<(Key, Value)> = entries.iter().map(|e| (e.key, e.value)).collect();
+        assert_eq!(
+            pairs,
+            vec![
+                (k(1), v(10)),
+                (k(2), v(200)),
+                (k(3), v(30)),
+                (k(5), v(50)),
+                (k(6), v(600)),
+                (k(7), v(70)),
+                (k(8), v(80)),
+            ]
+        );
+        assert_eq!(map.len(), Length::new(7));
     }
 
     #[test]
