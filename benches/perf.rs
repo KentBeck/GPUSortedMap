@@ -1,6 +1,7 @@
 use gpusorted_map::{Capacity, GpuSortedMap, Key, KvEntry, Value};
 use rand::rngs::StdRng;
-use rand::{RngCore, SeedableRng};
+use rand::seq::SliceRandom;
+use rand::SeedableRng;
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::Write;
@@ -13,7 +14,13 @@ fn main() {
 
     let mut rows = Vec::new();
     for size in sizes {
-        let keys_raw: Vec<u32> = (0..size).map(|_| rng.next_u32()).collect();
+        // Generate unique keys by shuffling a contiguous range, then applying a
+        // bijective affine transform over u32 for wider value distribution.
+        let mut keys_raw: Vec<u32> = (0..(size as u32)).collect();
+        keys_raw.shuffle(&mut rng);
+        for key in &mut keys_raw {
+            *key = key.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        }
         let keys: Vec<Key> = keys_raw.iter().copied().map(Key::new).collect();
         let entries: Vec<KvEntry> = keys_raw
             .iter()
