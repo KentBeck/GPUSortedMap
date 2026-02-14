@@ -16,5 +16,13 @@ about: Report a bug
 - GPU:
 - wgpu backend:
 - Rust version:
+- Commit/branch:
 
 ## Logs / output
+
+## Invariant impact (if known)
+- [ ] Sorted slab ordering
+- [ ] Tombstone handling
+- [ ] `len()` / `live_len`
+- [ ] Range semantics
+- [ ] Unknown

@@ -54,6 +54,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 - Tests attempt to use a fallback adapter if no GPU is present. If no
   software adapter is available, tests may fail.
 
+## For agents
+
+If you are using an AI coding agent in this repo, start here:
+
+- `AGENTS.md` for invariants, canonical commands, and editing guardrails
+- `AI_QUICKSTART.md` for architecture map and common change playbooks
+- `notes/tombstone_structure.md` for tombstone behavior and tradeoffs
+
 ## API overview
 
 - `bulk_put(&[KvEntry]) -> Result<(), GpuMapError>` - Batch insert/update
@@ -160,6 +168,23 @@ The benchmark writes CSV output into `perf/`:
 cargo bench --bench perf
 ```
 
+For faster smoke runs, override sizes:
+
+```bash
+PERF_SIZES=1,10,100 cargo bench --bench perf
+```
+
+In environments without an available GPU adapter, smoke runs can continue by
+setting:
+
+```bash
+PERF_SIZES=1,10,100 PERF_ALLOW_NO_GPU=1 cargo bench --bench perf
+```
+
+Notes:
+- Benchmark key generation guarantees unique keys so `bulk_put` does not fail on duplicates.
+- `perf/*.csv` is gitignored by default; force-add a CSV when you want to check in results.
+
 ## Project status
 
 This crate is experimental and the public API may change.
@@ -168,7 +193,7 @@ This crate is experimental and the public API may change.
 
 - **API Documentation**: [docs.rs/gpusorted_map](https://docs.rs/gpusorted_map)
 - **Development Guide**: See [DEVELOPMENT.md](DEVELOPMENT.md) for contribution setup
-- **Examples**: Check the [examples/](examples/) directory
+- **Examples**: Check [examples/basic.rs](examples/basic.rs), [examples/bulk_get.rs](examples/bulk_get.rs), [examples/range_scan.rs](examples/range_scan.rs), and [examples/tombstone_revival.rs](examples/tombstone_revival.rs)
 - **Changelog**: See [CHANGELOG.md](CHANGELOG.md) for version history
 
 ## Roadmap

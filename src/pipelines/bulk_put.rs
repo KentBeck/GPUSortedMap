@@ -1,3 +1,8 @@
+//! Bulk put pipeline.
+//!
+//! This pipeline performs sort -> dedup -> merge. The merge phase is also
+//! responsible for compacting away tombstoned slab entries.
+
 use std::sync::Arc;
 
 use crate::gpu_array::{GpuArray, GpuStorage};
@@ -606,6 +611,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let a = slab[i];
         let b = input[j];
         if (a.key < b.key) {
+            // Compaction: skip dead slab slots rather than copying them forward.
             if (a.value != 0xffffffffu) {
                 output[k] = a;
                 k = k + 1u;

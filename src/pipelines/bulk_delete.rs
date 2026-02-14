@@ -1,3 +1,8 @@
+//! Bulk delete pipeline.
+//!
+//! One GPU thread handles one key, binary-searches the sorted slab, and marks
+//! a match as tombstoned by writing the reserved sentinel value.
+
 use std::sync::Arc;
 
 use crate::gpu_array::GpuArray;

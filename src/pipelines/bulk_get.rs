@@ -1,3 +1,9 @@
+//! Bulk lookup pipeline.
+//!
+//! One GPU thread handles one requested key and performs a binary search over
+//! the sorted slab. Host-side post-processing maps missing keys and tombstones
+//! to `None`.
+
 use std::sync::Arc;
 
 use crate::gpu_array::GpuArray;

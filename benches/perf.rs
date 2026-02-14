@@ -9,10 +9,12 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn main() {
-    let sizes = [1_usize, 10, 100, 1_000, 10_000, 100_000, 1_000_000];
+    let sizes = benchmark_sizes();
+    let allow_no_gpu = allow_no_gpu();
     let mut rng = StdRng::seed_from_u64(0x5eed);
 
     let mut rows = Vec::new();
+    let mut gpu_unavailable = false;
     for size in sizes {
         // Generate unique keys by shuffling a contiguous range, then applying a
         // bijective affine transform over u32 for wider value distribution.
@@ -31,7 +33,17 @@ fn main() {
             .collect();
 
         let (btree_put, btree_get) = bench_btree(&keys_raw);
-        let (gpu_put, gpu_get) = bench_gpu(&entries, &keys);
+        let (gpu_put, gpu_get) = match bench_gpu(&entries, &keys) {
+            Ok(durations) => durations,
+            Err(err) if allow_no_gpu => {
+                if !gpu_unavailable {
+                    eprintln!("GPU unavailable, continuing without GPU timings: {err}");
+                    gpu_unavailable = true;
+                }
+                (Duration::ZERO, Duration::ZERO)
+            }
+            Err(err) => panic!("failed to init GPU map: {err}"),
+        };
 
         rows.push((size, btree_put, btree_get, gpu_put, gpu_get));
     }
@@ -66,6 +78,27 @@ fn main() {
     println!("wrote perf results to {}", path.display());
 }
 
+fn benchmark_sizes() -> Vec<usize> {
+    std::env::var("PERF_SIZES")
+        .ok()
+        .map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.parse::<usize>().expect("invalid PERF_SIZES entry"))
+                .collect::<Vec<_>>()
+        })
+        .filter(|sizes| !sizes.is_empty())
+        .unwrap_or_else(|| vec![1, 10, 100, 1_000, 10_000, 100_000, 1_000_000])
+}
+
+fn allow_no_gpu() -> bool {
+    matches!(
+        std::env::var("PERF_ALLOW_NO_GPU").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE")
+    )
+}
+
 fn bench_btree(keys: &[u32]) -> (Duration, Duration) {
     let mut map = BTreeMap::new();
     let start = Instant::now();
@@ -85,9 +118,11 @@ fn bench_btree(keys: &[u32]) -> (Duration, Duration) {
     (put, start.elapsed())
 }
 
-fn bench_gpu(entries: &[KvEntry], keys: &[Key]) -> (Duration, Duration) {
-    let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new((entries.len() * 2) as u32)))
-        .expect("failed to init GPU map");
+fn bench_gpu(
+    entries: &[KvEntry],
+    keys: &[Key],
+) -> Result<(Duration, Duration), gpusorted_map::GpuMapError> {
+    let mut map = pollster::block_on(GpuSortedMap::new(Capacity::new((entries.len() * 2) as u32)))?;
 
     let start = Instant::now();
     map.bulk_put(entries).expect("bulk_put failed");
@@ -96,7 +131,7 @@ fn bench_gpu(entries: &[KvEntry], keys: &[Key]) -> (Duration, Duration) {
     let start = Instant::now();
     let values = map.bulk_get(keys);
     std::hint::black_box(values);
-    (put, start.elapsed())
+    Ok((put, start.elapsed()))
 }
 
 fn git_head() -> Option<String> {

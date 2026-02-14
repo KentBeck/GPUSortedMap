@@ -1,3 +1,9 @@
+//! Range boundary pipeline.
+//!
+//! Computes `[start, end)` index bounds for `[from_key, to_key)` using
+//! lower-bound binary searches over sorted keys. Tombstone filtering happens in
+//! host code after readback.
+
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
